@@ -17,19 +17,18 @@ class TrackerHandler:
         self.port = random.randint(6881, 6889)  # Typical BitTorrent client ports
 
         self.info_hash = hashlib.sha1(bencodepy.encode(self.torrent.info_dict)).digest()
-        self.info_hash = requests.utils.quote(self.info_hash)
         self.peers_list = []
     
     def generate_peer_id(self):
         # Generate a 20-byte peer ID, e.g., -PYTHONCLIENT-00001
-        return "-PYTORRENT-" + "".join(str(random.randint(0, 9)) for _ in range(12))
+        return "-PYTORRENT-" + "".join(str(random.randint(0, 9)) for _ in range(9))
 
 
     # Method to build the request 
     def build_tracker_url(self, event:str = None):
         # Create the query string to send to the tracker
         query_params = {
-            'info_hash': self.info_hash,
+            'info_hash': requests.utils.quote(self.info_hash),
             'peer_id': self.peer_id,
             'port': self.port,
             'uploaded': 0,
@@ -77,6 +76,6 @@ class TrackerHandler:
             peers_list.append((ip, port))
         self.peers_list = peers_list
 
-        # print(f"Decoded peers: {self.peers_list}")
+
         
     
