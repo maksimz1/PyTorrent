@@ -12,6 +12,7 @@ class Torrent:
         self.files: str = None  # Information about the files in the torrent
         self.file_length: int = 0  # Total length of the files in bytes
         self.pieces = None  # A string containing SHA-1 hashes of the file pieces
+        self.total_pieces: int = 0  # Total number of pieces in the torrent
         self.piece_length: int = 0  # Length of each piece in bytes
         self.name: str = None  # Name of the torrent (usually the folder or main file)
         self.creation_date = None
@@ -46,6 +47,7 @@ class Torrent:
 
             # Extract the pieces (concatenated SHA-1 hashes of file pieces)
             self.pieces = data[b'info'][b'pieces']
+            self.total_pieces = len(self.pieces) // 20
             
             if b'announce-list' in data:
                 self.announce_list = [

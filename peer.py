@@ -1,5 +1,6 @@
 import socket
-
+from message import Message
+from network import recv_by_size
 class Peer:
     def __init__(self, ip : str, port : int, info_hash, peer_id) -> None:
         self.ip = ip
@@ -13,6 +14,7 @@ class Peer:
             'peer_choking': True,
             'peer_interested': False
         }
+        self.healthy = True
 
     
     def connect(self):
@@ -21,19 +23,22 @@ class Peer:
         """
         # self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # self.sock.connect((self.ip, self.port))
-        self.sock = socket.create_connection((self.ip, self.port), timeout=2)
-        print(f"Connected to {self.ip}:{self.port}")
         try:
-
+            self.sock = socket.create_connection((self.ip, self.port), timeout=4)
+            print(f"Connected to {self.ip}:{self.port}")
             # Perform handshake
             self._send_handshake()
             response = self._recv_handshake()
-
+            parsed_response = self._parse_handshake(response)
+            
+            
             print(f"Raw response: {response}")
-            print(f'Parsed response: {self._parse_handshake(response)}')
+            print(f'Parsed response: {parsed_response}\n')
+
         
-        except socket.error:
-            print(f"Connection to {self.ip}:{self.port} failed")
+        except socket.error as e:
+            self.healthy = False
+            # print(f"Connection failed: {e}")
     
     
     def _send_handshake(self):
@@ -85,3 +90,17 @@ class Peer:
             'info_hash': info_hash,
             'peer_id': peer_id
         }
+    
+    def send(self, message):
+        """
+        Send a serialized message to the peer.
+
+        :param message: An instance of a Message class.
+        """
+        if isinstance(message, Message):
+            self.sock.sendall(message.serialize())
+        else:
+            raise ValueError("Invalid message object.")
+
+    def recv(self):
+        return recv_by_size(self.sock)
