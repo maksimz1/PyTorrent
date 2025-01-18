@@ -12,15 +12,17 @@ class Message:
 
     @classmethod
     def deserialize(cls, data):
-        """Deserialize the message from the given data"""
-        message_id = data[0]
-        message_map = cls._build_message_map()
-        message_class = message_map.get(message_id)
-        print(f"Deserializng message: {message_class}, {message_id}")
-        if not message_class:
-            raise ValueError(f"Invalid message ID: {message_id}")
-        return message_class.deserialize_payload(data[1:])
-
+        try:
+            """Deserialize the message from the given data"""
+            message_id = data[0]
+            message_map = cls._build_message_map()
+            message_class = message_map.get(message_id)
+            print(f"Deserializng message: {message_class}, {message_id}")
+            if not message_class:
+                raise ValueError(f"Invalid message ID: {message_id}")
+            return message_class.deserialize_payload(data[1:])
+        except Exception as e:
+            print(f"Error deserializing message: {e}")
     def deserialize_payload(self, data):
         raise NotImplementedError
 
@@ -53,18 +55,45 @@ class KeepAlive:
 class Choke(Message):
     message_id = 0
     def __init__(self):
-        pass
+        super().__init__(None)
+        self.length = (1).to_bytes(4, byteorder='big')
+        self.payload = self.length + bytes([self.message_id])
+    
+    def serialize(self):
+        return self.payload
+    
+    @classmethod
+    def deserialize_payload(cls, data):
+        return Unchoke()
+
 
 class Unchoke(Message):
     message_id = 1
     def __init__(self):
         super().__init__(None)
-        se
+        self.length = (1).to_bytes(4, byteorder='big')
+        self.payload = self.length + bytes([self.message_id])
+    
+    def serialize(self):
+        return self.payload
+    
+    @classmethod
+    def deserialize_payload(cls, data):
+        return Unchoke()
 
 class Interested(Message):
     message_id = 2
     def __init__(self):
-        pass
+        super().__init__(None)
+        self.length = (1).to_bytes(4, byteorder='big')
+        self.payload = self.length + bytes([self.message_id])
+    
+    def serialize(self):
+        return self.payload
+    
+    @classmethod
+    def deserialize_payload(self, data):
+        return Interested()
 
 class NotInterested(Message):
     message_id = 3
@@ -76,6 +105,10 @@ class Have(Message):
     def __init__(self):
         pass
 
+    @classmethod
+    def deserialize_payload(cls, data):
+        return Have()
+
 class Bitfield(Message):
     message_id = 5
     def __init__(self, bitfield):
@@ -85,8 +118,9 @@ class Bitfield(Message):
         self.bitfield_length = len(self.bitfield_bytes)
 
         self.total_length = self.bitfield_length + 1
+        
         self.payload = (
-            bytes([self.total_length]) +
+            self.total_length.to_bytes(4, 'big') +
             bytes([self.message_id]) +
             self.bitfield_bytes
         )
@@ -105,13 +139,38 @@ class Bitfield(Message):
 
 class Request(Message):
     message_id = 6
-    def __init__(self):
-        pass
+
+    def __init__(self, index, begin, length):
+        super().__init__(None)
+        self.index = index
+        self.begin = begin
+        self.length = length
+
+    def serialize(self):
+        payload = (
+            self.index.to_bytes(4, byteorder='big') +
+            self.begin.to_bytes(4, byteorder='big') +
+            self.length.to_bytes(4, byteorder='big')
+        )
+        message_length = (1 + len(payload)).to_bytes(4, byteorder='big')
+
+        return message_length + bytes([self.message_id]) + payload
 
 class Piece(Message):
     message_id = 7
-    def __init__(self):
-        pass
+    
+    def __init__(self, index, begin ,block):
+        self.index = index
+        self.begin = begin
+        self.block = block
+    
+    @classmethod
+    def deserialize_payload(cls, data):
+        index = int.from_bytes(data[:4], 'big')
+        begin = int.from_bytes(data[4:8], 'big')
+        block = data[8:]
+        return Piece(index, begin, block)
+
 
 class Cancel(Message):
     message_id = 8

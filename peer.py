@@ -1,5 +1,6 @@
 import socket
 from message import Message
+import message
 from network import recv_by_size
 class Peer:
     def __init__(self, ip : str, port : int, info_hash, peer_id) -> None:
@@ -15,6 +16,7 @@ class Peer:
             'peer_interested': False
         }
         self.healthy = True
+        self.bitfield = None
 
     
     def connect(self):
@@ -24,7 +26,7 @@ class Peer:
         # self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # self.sock.connect((self.ip, self.port))
         try:
-            self.sock = socket.create_connection((self.ip, self.port), timeout=4)
+            self.sock = socket.create_connection((self.ip, self.port), timeout=1)
             print(f"Connected to {self.ip}:{self.port}")
             # Perform handshake
             self._send_handshake()
@@ -67,7 +69,7 @@ class Peer:
         """
         if len(response) != 68:
             # print(f'Length of response: {len(response)}')
-            raise ValueError("Invalid handshake response")
+            raise ValueError(f"Invalid handshake response {response}")
         
         """
         Format:
@@ -90,6 +92,25 @@ class Peer:
             'info_hash': info_hash,
             'peer_id': peer_id
         }
+    
+    def request_piece(self, index, begin, length):
+        """
+        Send a request for specific piece
+        """
+        request_message = message.Request(index, begin, length)
+        self.send(request_message)
+        print(f"Sent request for piece {index} at {begin} with length {length}")
+
+    def handle_piece(self, piece: message.Piece):
+        """
+        Handle and process the piece data
+        """
+        idx = piece.index
+        block_offset = piece.begin
+        print(block_offset)
+        with open(f"file_pieces/{idx}.part", "r+b") as f:
+            f.seek(block_offset)
+            f.write(piece.block)
     
     def send(self, message):
         """
