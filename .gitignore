@@ -1,1 +1,6 @@
 __pycache__
+.venv
+torrents
+.idea
+file_pieces
+test.py

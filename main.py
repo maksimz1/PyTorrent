@@ -2,6 +2,7 @@
 from torrent import Torrent
 from tracker import TrackerHandler
 from peer import Peer
+from piece_manager import PieceManager
 import socket
 import bitstring
 import message
@@ -40,6 +41,8 @@ def main():
 
     tracker_h = TrackerHandler(tor)
 
+    piece_manager = PieceManager(tor)
+
     tracker_h.send_request()
     print(f'Tracker response: {tracker_h.response}')
     print()
@@ -53,7 +56,7 @@ def main():
         first_peer = peer
         try:
             print(f"Connecting to {first_peer[0]}:{first_peer[1]}")
-            my_peer = Peer(first_peer[0], first_peer[1] , tracker_h.info_hash, tracker_h.peer_id)
+            my_peer = Peer(first_peer[0], first_peer[1] , tracker_h.info_hash, tracker_h.peer_id, piece_manager=piece_manager)
             my_peer.connect()
             
             
@@ -75,7 +78,7 @@ def main():
     # piece_idx = bitfield.find('0b0')[0]
     piece_idx = 2
     MAX_RETRIES = 3 # Maximum number of retries for unexpected responses
-
+    peer : Peer
     for peer in healthy_peers:
         try:
             # Send bitfield, Get bitfield
@@ -152,7 +155,7 @@ def main():
                     piece = message.Message.deserialize(response)
 
                     if isinstance(piece, message.Piece):
-                        print(f"Received block at offset {offset}")
+                        # print(f"Received block at offset {offset}")
                         
                         peer.handle_piece(piece)
                         cur_piece_length += len(piece.block)

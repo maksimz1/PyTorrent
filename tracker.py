@@ -3,7 +3,7 @@ import requests
 import bencodepy
 import random
 import socket
-from parser import Torrent
+from torrent import Torrent
 
 
 class TrackerHandler:
@@ -75,7 +75,3 @@ class TrackerHandler:
             port = int.from_bytes(peers[i + 4:i + 6], 'big') # Decode port from bytes
             peers_list.append((ip, port))
         self.peers_list = peers_list
-
-
-        
-    

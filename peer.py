@@ -2,8 +2,10 @@ import socket
 from message import Message
 import message
 from network import recv_by_size
+from piece_manager import PieceManager
 class Peer:
-    def __init__(self, ip : str, port : int, info_hash, peer_id) -> None:
+    # Temporary refernce to Piece manager, Until i make an event-based system 
+    def __init__(self, ip : str, port : int, info_hash, peer_id, piece_manager: PieceManager) -> None:
         self.ip = ip
         self.port = port
         self.info_hash = info_hash
@@ -17,6 +19,7 @@ class Peer:
         }
         self.healthy = True
         self.bitfield = None
+        self.piece_manager = piece_manager
 
     
     def connect(self):
@@ -105,12 +108,14 @@ class Peer:
         """
         Handle and process the piece data
         """
-        idx = piece.index
-        block_offset = piece.begin
-        print(block_offset)
-        with open(f"file_pieces/{idx}.part", "r+b") as f:
-            f.seek(block_offset)
-            f.write(piece.block)
+        # idx = piece.index
+        # block_offset = piece.begin
+        # print(block_offset)
+        # with open(f"file_pieces/{idx}.part", "r+b") as f:
+        #     f.seek(block_offset)
+        #     f.write(piece.block)
+        print(f"📥 Received block for piece {piece.index} at offset {piece.begin}")
+        self.piece_manager.recieve_block_piece(piece.index, piece.begin, piece.block)
     
     def send(self, message):
         """
