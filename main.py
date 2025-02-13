@@ -8,13 +8,14 @@ import message
 import traceback
 from requests import get
 import os
+import sys
 
 ip = get('https://api.ipify.org').content.decode('utf8')
 print(f"My IP: {ip}")
 
 MY_IP = ip
 
-def main():
+def main(torrent_path : str, piece_index : int) -> None:
     """
     Steps of torrent:
 
@@ -31,7 +32,7 @@ def main():
     tor = Torrent()
 
     # Load and process the .torrent file
-    tor.load_file("torrents/starwars.torrent")
+    tor.load_file(torrent_path)
     tor.display_info()
     print()
 
@@ -59,10 +60,11 @@ def main():
             
             if my_peer.healthy:
                 healthy_peers.append(my_peer)
-                my_peer.sock.settimeout(3)
+                my_peer.sock.settimeout(5)
 
         except socket.error as e:
             print(f"Connection to {first_peer[0]}:{first_peer[1]} failed")
+            traceback.exec_print()
             continue
 
         except ValueError as e:
@@ -72,8 +74,7 @@ def main():
 
     print('\n'*5)
 
-    # piece_idx = bitfield.find('0b0')[0]
-    piece_idx = 2
+    # piece_index = bitfield.find('0b0')[0]
     MAX_RETRIES = 3 # Maximum number of retries for unexpected responses
 
     for peer in healthy_peers:
@@ -132,7 +133,7 @@ def main():
             cur_piece_length = 0
             print(f"Piece length: {piece_length}")
             block_size = 16 * 1024  # Request blocks of 16 KB
-            piece_path = f"file_pieces/{piece_idx}.part"
+            piece_path = f"file_pieces/{piece_index}.part"
             if not os.path.exists(piece_path):
                 with open(piece_path, "wb") as f:
                     f.write(b"\x00" * piece_length)
@@ -141,7 +142,7 @@ def main():
                 length = min(block_size, piece_length - offset)
                 retries = 0
                 while retries < MAX_RETRIES:
-                    peer.request_piece(piece_idx, offset, length)
+                    peer.request_piece(piece_index, offset, length)
                     
                     response = peer.recv()
                     if not response:
@@ -168,7 +169,8 @@ def main():
                 
                 if retries == MAX_RETRIES:
                     print(f"Failed to download block at offset {offset}")
-                    healthy_peers.remove(peer)
+                    if peer in healthy_peers:
+                        healthy_peers.remove(peer)
             if cur_piece_length >= piece_length:
                 break
             
@@ -186,30 +188,29 @@ def main():
 
         except socket.error as e:
             print(f"Connection to {peer.ip}:{peer.port} failed")
-            # traceback.print_exc()
+            traceback.print_exc()
             continue
 
 if __name__ == "__main__":
-    main()
-    # clss = message.Message.__subclasses__()
+    # main(sys.argv[1], 3)
+
     # for cls in clss:
     #     cls()
 
-    # tor = Torrent()
-    # import hashlib
-    # # Load and process the .torrent file
-    # tor.load_file("torrents/starwars.torrent")
-    # tor.display_info()
-    # piece_index = 0
-    # original = tor.pieces[piece_index * 20:(piece_index + 1) * 20]
+    tor = Torrent()
+    import hashlib
+    # Load and process the .torrent file
+    tor.load_file("torrents/starwars.torrent")
+    tor.display_info()
+    piece_index = 0 
+    original = tor.pieces[piece_index * 20:(piece_index + 1) * 20]
+    with open(f"file_pieces/{piece_index}.part", 'rb') as f:
+        full_data = f.read()
 
-    # with open(f"file_pieces/{piece_index}.part", 'rb') as f:
-    #     full_data = f.read()
-
-    # actual_hash = hashlib.sha1(full_data).digest()
+    actual_hash = hashlib.sha1(full_data).digest()
     
-    # print(original)
-    # print(actual_hash)
+    print(original)
+    print(actual_hash)
 
 
 

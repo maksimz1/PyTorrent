@@ -3,7 +3,7 @@ import requests
 import bencodepy
 import random
 import socket
-from parser import Torrent
+from torrent import Torrent
 
 
 class TrackerHandler:
