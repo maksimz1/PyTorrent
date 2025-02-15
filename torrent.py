@@ -9,7 +9,7 @@ class Torrent:
         # Initialize all the metadata attributes
         self.announce = None  # The URL of the tracker
         self.announce_list = [] # List of tracker URLS
-        self.files: str = None  # Information about the files in the torrent
+        self.files = []  # Information about the files in the torrent
         self.file_length: int = 0  # Total length of the files in bytes
         self.pieces = None  # A string containing SHA-1 hashes of the file pieces
         self.total_pieces: int = 0  # Total number of pieces in the torrent
@@ -61,7 +61,9 @@ class Torrent:
                 for file_info in data[b'info'][b'files']:
                     length = file_info[b'length']
                     path = [p.decode('utf-8') for p in file_info[b'path']]
+                    
                     self.files.append({'length': length, 'path': path})
+                    
             else:
                 # Single-file torrent
                 self.file_length = data[b'info'][b'length']

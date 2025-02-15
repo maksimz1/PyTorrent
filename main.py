@@ -1,4 +1,3 @@
-
 from torrent import Torrent
 from tracker import TrackerHandler
 from peer import Peer
@@ -16,205 +15,159 @@ print(f"My IP: {ip}")
 
 MY_IP = ip
 
-def main(torrent_path : str, piece_index : int) -> None:
+def download_piece(peer: Peer, piece_index: int, piece_length: int) -> bool:
     """
-    Steps of torrent:
+    Download a single piece from a peer. Returns True if successful, False otherwise.
+    """
+    block_size = 16 * 1024  # Request blocks of 16 KB
+    cur_piece_length = 0
+    MAX_RETRIES = 3
+    
+    piece_path = f"file_pieces/{piece_index}.part"
+    if not os.path.exists(piece_path):
+        with open(piece_path, "wb") as f:
+            f.write(b"\x00" * piece_length)
+            
+    for offset in range(0, piece_length, block_size):
+        length = min(block_size, piece_length - offset)
+        retries = 0
+        
+        while retries < MAX_RETRIES:
+            try:
+                peer.request_piece(piece_index, offset, length)
+                response = peer.recv()
+                
+                if not response:
+                    print(f"No response for block at offset {offset}.")
+                    retries += 1
+                    continue
 
-    1. Parse the torrent file
-    2. Send a request to the tracker
-    3. Connect to the peers 
-    4. Send and recieve a bitfield message(Indicating what pieces we have)
-    5. Send an unchoke message to the peer
-    6. Send a request message to the peer
-    7. Recieve the piece from the peer
-    8. Repeat steps 6 and 7 until all pieces are downloaded
+                piece = message.Message.deserialize(response)
+
+                if isinstance(piece, message.Piece):
+                    peer.handle_piece(piece)
+                    cur_piece_length += len(piece.block)
+                    break
+                else:
+                    print(f"Got unexpected response type {type(piece)}, retrying...")
+                    retries += 1
+                    
+            except socket.error as e:
+                print(f"Socket error while downloading: {e}")
+                return False
+                
+        if retries == MAX_RETRIES:
+            print(f"Failed to download block at offset {offset}")
+            return False
+            
+    return cur_piece_length >= piece_length
+
+def initialize_peer(peer: Peer) -> bool:
     """
+    Initialize connection with a peer. Returns True if successful, False otherwise.
+    Simplified to only send interested message since we're just leeching.
+    """
+    try:
+        print(f"Initializing connection with {peer.ip}:{peer.port}")
+        
+        # Send interested message right away
+        peer.send(message.Interested())
+        print(f"Sent interested message")
+
+        # Wait for unchoke
+        while True:
+            response = peer.recv()
+            response_message = message.Message.deserialize(response)
+            
+            if isinstance(response_message, message.Unchoke):
+                print("Peer unchoked us. Ready to request pieces.")
+                return True
+            elif isinstance(response_message, message.Bitfield):
+                print("Got bitfield, continuing to wait for unchoke")
+                peer.bitfield = response_message.bitfield
+                continue
+            elif isinstance(response_message, message.Have):
+                print("Got Have message, continuing to wait for unchoke")
+                continue
+            else:
+                print(f"Got unexpected message: {type(response_message)}")
+                continue
+                
+    except socket.error as e:
+        print(f"Connection error during initialization: {e}")
+        return False
+
+def main(torrent_path: str) -> None:
     # Create an instance of the Torrent class
     tor = Torrent()
-
-    # Load and process the .torrent file
     tor.load_file(torrent_path)
     tor.display_info()
     print()
 
-    # Bitfield to store the pieces we have
-    bitfield = bitstring.BitArray(length=tor.total_pieces)
-
+    # Initialize torrent components
     tracker_h = TrackerHandler(tor)
-
     piece_manager = PieceManager(tor)
 
     tracker_h.send_request()
     print(f'Tracker response: {tracker_h.response}')
     print()
 
+    # Connect to peers and initialize them only once
     healthy_peers = []
-    for peer in tracker_h.peers_list: 
-        # first_peer = tracker_h.peers_list[0]
+    for peer in tracker_h.peers_list:
         if peer[0] == MY_IP:
             print("Skipping self")
             continue
-        first_peer = peer
+
         try:
-            print(f"Connecting to {first_peer[0]}:{first_peer[1]}")
-            my_peer = Peer(first_peer[0], first_peer[1] , tracker_h.info_hash, tracker_h.peer_id, piece_manager=piece_manager)
+            print(f"Connecting to {peer[0]}:{peer[1]}")
+            my_peer = Peer(peer[0], peer[1], tracker_h.info_hash, tracker_h.peer_id, piece_manager=piece_manager)
             my_peer.connect()
-            
-            
-            if my_peer.healthy:
-                healthy_peers.append(my_peer)
-                my_peer.sock.settimeout(5)
-
-        except socket.error as e:
-            print(f"Connection to {first_peer[0]}:{first_peer[1]} failed")
-            traceback.exec_print()
-            continue
-
-        except ValueError as e:
-            print(f"Invalid handshake response: {e}")
-            traceback.print_exc()
-            continue
-
-    print('\n'*5)
-
-    # piece_index = bitfield.find('0b0')[0]
-    MAX_RETRIES = 3 # Maximum number of retries for unexpected responses
-    peer : Peer
-    for peer in healthy_peers:
-        try:
-            # Send bitfield, Get bitfield
-            print(f"Talking to {peer.ip}:{peer.port}")
-            peer.send(message.Bitfield(bitfield))
-            print(f"Sent bitfield")
-            bitfield_response = peer.recv()
-            # print(f"Response: {response}")
-            bitfield_response : message.Bitfield = message.Message.deserialize(bitfield_response)
-            if isinstance(bitfield_response, message.Bitfield):
-                print("Got bitfield")
-                peer.bitfield = bitfield_response.bitfield
-            else:
-                print("Failed to get bitfield")
+            if not my_peer.healthy:
                 continue
-
-            
-            # Send unchoke, Get Unchoke/Choke
-            peer.send(message.Unchoke())
-            peer.state['am_choking'] = False
-            print(f"Sent unchoke")
-
-            while True:
-
-                response = peer.recv()
-                #print(f"Response: {unchoke_response}")
-                response_message = message.Message.deserialize(response)
-                
-                if isinstance(response_message, message.Have):
-                    print("Got unsupported Have message, Ignoring.")
-
-                elif isinstance(response_message, message.Unchoke):
-                    print("Peer unchoked me. Ready to request pieces.")
-                    retries = MAX_RETRIES
-                    break
-
-                elif isinstance(response_message, message.Piece):
-                    print(f"Unexpected Piece message during initialization. Skipping.")
-                    continue
-
-                else:
-                    print(f"Unexpected message type: {type(response_message)}. Ignoring.")
-                    continue
-
-            # Interested 
-            peer.send(message.Interested())
-            peer.state['am_interested'] = True
-            print(f"Sent interested")
-            # response = peer.recv()
-            #print(f"Response: {response}")
-
-            # Actual piece downloading
-            piece_length = tor.piece_length 
-            cur_piece_length = 0
-            print(f"Piece length: {piece_length}")
-            block_size = 16 * 1024  # Request blocks of 16 KB
-            piece_path = f"file_pieces/{piece_index}.part"
-            if not os.path.exists(piece_path):
-                with open(piece_path, "wb") as f:
-                    f.write(b"\x00" * piece_length)
-            for offset in range(0, piece_length, block_size):
-                
-                length = min(block_size, piece_length - offset)
-                retries = 0
-                while retries < MAX_RETRIES:
-                    peer.request_piece(piece_index, offset, length)
-                    
-                    response = peer.recv()
-                    if not response:
-                        print(f"No response for block at offset {offset}.")
-                        retries += 1
-                        continue
-
-                    piece = message.Message.deserialize(response)
-
-                    if isinstance(piece, message.Piece):
-                        # print(f"Received block at offset {offset}")
-                        
-                        peer.handle_piece(piece)
-                        cur_piece_length += len(piece.block)
-                        break
-
-                    elif isinstance(piece, message.Choke):
-                        print(f"Peer {peer.ip}:{peer.port} choked us.")
-                        peer.state['peer_choking'] = True
-                        break
-                    else:
-                        print(f"Got response of type {type(piece)}, can't handle, Retrying...")
-                        retries += 1
-                
-                if retries == MAX_RETRIES:
-                    print(f"Failed to download block at offset {offset}")
-                    if peer in healthy_peers:
-                        healthy_peers.remove(peer)
-            if cur_piece_length >= piece_length:
-                break
-            
-            
-            # peer.request_piece(0, 0, piece_length)
-            # print(f"Requested piece 0")
-
-            # response = peer.recv()
-            # print(f"Piece response: {response}")
-            # piece = message.Message.deserialize(response)
-            # if isinstance(piece, message.Piece):
-            #     print(f"Recieved piece 0")
-            #     bitfield[0] = 1
-            #     print(bitfield)
-
-        except socket.error as e:
-            print(f"Connection to {peer.ip}:{peer.port} failed")
-            traceback.print_exc()
+            # Initialize the peer connection once
+            if not initialize_peer(my_peer):
+                continue
+            healthy_peers.append(my_peer)
+            my_peer.sock.settimeout(5)
+        except (socket.error, ValueError) as e:
+            print(f"Connection to {peer[0]}:{peer[1]} failed: {e}")
             continue
+
+    if not healthy_peers:
+        print("No healthy peers found. Exiting.")
+        return
+
+    # Determine the starting piece (based on what already exists on disk)
+    start_piece = len(os.listdir("file_pieces"))
+
+    # Download pieces sequentially using the already-initialized peers
+    for piece_index in range(start_piece, tor.total_pieces):
+        print(f"\nStarting download of piece {piece_index}")
+        piece_downloaded = False
+
+        # Iterate over healthy peers without reinitializing
+        for peer in healthy_peers[:]:
+            if download_piece(peer, piece_index, tor.piece_length):
+                piece_downloaded = True
+                print(f"✅ Successfully downloaded piece {piece_index}")
+                break
+            else:
+                print(f"Failed to download piece {piece_index} from {peer.ip}:{peer.port}")
+                healthy_peers.remove(peer)
+
+        if not piece_downloaded:
+            print(f"❌ Failed to download piece {piece_index} from any peer")
+            if not healthy_peers:
+                print("No more healthy peers available. Exiting.")
+                break
+
+    print("\nDownload complete!")
+    print(f"Attempted to download {piece_index + 1} out of {tor.total_pieces} pieces")
+
 
 if __name__ == "__main__":
-    # main(sys.argv[1], 3)
-
-    # for cls in clss:
-    #     cls()
-
-    tor = Torrent()
-    import hashlib
-    # Load and process the .torrent file
-    tor.load_file("torrents/starwars.torrent")
-    tor.display_info()
-    piece_index = 0 
-    original = tor.pieces[piece_index * 20:(piece_index + 1) * 20]
-    with open(f"file_pieces/{piece_index}.part", 'rb') as f:
-        full_data = f.read()
-
-    actual_hash = hashlib.sha1(full_data).digest()
-    
-    print(original)
-    print(actual_hash)
-
-
-
-    # ישתבך שמו לעד, אחרי שעות רבות זה עובד
+    if len(sys.argv) != 2:
+        print("Usage: python main.py <torrent_file>")
+        sys.exit(1)
+    main(sys.argv[1])
