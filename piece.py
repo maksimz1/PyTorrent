@@ -11,3 +11,9 @@ class Piece:
 
     def is_complete(self):
         return len(self.raw_data) == self.piece_length
+    
+    def flush(self):
+        """
+        Reset the data in case of a download failure
+        """
+        self.raw_data = b''

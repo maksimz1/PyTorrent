@@ -6,6 +6,7 @@ import hashlib
 class PieceManager:
     def __init__(self, torrent: Torrent):
         self.pieces: typing.List[Piece] = []
+        self.busy_pieces = set()
         self.torrent = torrent
         self.number_of_pieces = torrent.total_pieces
 
@@ -30,9 +31,14 @@ class PieceManager:
                 print(f"✅ Piece {piece_index} completed and verified! Writing to disk...")
                 with open(f"file_pieces/{piece_index}.part", 'wb') as f:
                     f.write(piece.raw_data)
+                
+                # Release the piece after download successful
+                self.busy_pieces.remove(piece_index)
             else: 
                 print(f"❌ Hash mismatch for piece {piece_index}. Retrying...")
-                piece.raw_data = b"" # Reset piece and redownload
+                piece.flush() # Reset piece and redownload
+                # Release the piece even if unsuccessful 
+                self.busy_pieces.remove(piece_index)
         else:
             print(f"Download not complete :/ {len(piece.raw_data)}")
 
@@ -52,3 +58,21 @@ class PieceManager:
     def _validate_piece(self, piece: Piece):
         actual_hash = hashlib.sha1(piece.raw_data).digest()
         return actual_hash == piece.piece_hash
+    
+    def choose_next_piece(self, peer_bifield = None):
+        """
+        Selects next piece to download.
+
+        To be ran by the PeerManager when ordering a peer to download a piece
+        """
+        for piece in self.pieces:
+            if piece.is_complete():
+                continue
+            if piece.piece_index in self.busy_pieces:
+                continue
+            if peer_bifield is not None:
+                if not peer_bifield[piece.piece_index]:
+                    continue
+            
+            self.busy_pieces.add(piece.piece_index)
+            return piece.piece_index
