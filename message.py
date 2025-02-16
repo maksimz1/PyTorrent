@@ -102,12 +102,22 @@ class NotInterested(Message):
 
 class Have(Message):
     message_id = 4
-    def __init__(self):
-        pass
+    def __init__(self, index: int):
+        super().__init__(None)
+        self.index = index
 
+        self.length = (5).to_bytes(4, byteorder='big')
+        self.payload = self.length + bytes([self.message_id]) + index.to_bytes(4, byteorder='big')
+
+    def serialize(self):
+        return self.payload
+    
     @classmethod
     def deserialize_payload(cls, data):
-        return Have()
+        if len(data) != 4:
+            raise ValueError("Invalig payload length for Have message")
+        index = int.from_bytes(data, 'big')
+        return cls(index)
 
 class Bitfield(Message):
     message_id = 5

@@ -95,7 +95,7 @@ class Peer:
             'info_hash': info_hash,
             'peer_id': peer_id
         }
-    
+
     def request_piece(self, index, begin, length):
         """
         Send a request for specific piece
@@ -130,3 +130,31 @@ class Peer:
 
     def recv(self):
         return recv_by_size(self.sock)
+    
+    def is_choking(self):
+        return self.state['peer_choking']
+    
+    def am_choking(self):
+        return self.state['am_choking']
+    
+    def is_interested(self):
+        return self.state['peer_interested']
+    
+    def am_interested(self):
+        return self.state['am_interested']
+
+    def handle_unchoke(self):
+        self.state['peer_choking'] = False
+
+    def handle_choke(self):
+        self.state['peer_choking'] = True
+    
+    def handle_bitfield(self, bitfield: message.Bitfield):
+        self.bitfield = bitfield.bitfield
+    
+    def handle_have(self, have: message.Have):
+        if self.bitfield is None:
+            total_pieces = self.piece_manager.number_of_pieces
+            self.bitfield = [0] * total_pieces
+        # Update the bitfield to indicate the peer has this piece
+        self.bitfield[have.index] = 1

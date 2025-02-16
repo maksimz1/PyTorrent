@@ -109,6 +109,102 @@ def initialize_peer(peer: Peer) -> bool:
         print(f"Connection error during initialization: {e}")
         return False
 
+class PeerManager:
+    def __init__(self, tracker: TrackerHandler, piece_manager: PieceManager, my_ip):
+        self.tracker = tracker
+        self.piece_manager = piece_manager
+        self.my_ip = my_ip
+        self.peers = []
+    
+
+    def add_eers(self):
+        # Create Peer instances from tracker response
+        for peer_info in self.tracker.peers_list:
+            if peer_info[0] == self.my_ip:
+                print("Skipping self.")
+                continue
+            
+            try:
+                new_peer = Peer(peer_info[0],
+                            peer_info[1],
+                            self.tracker.info_hash,
+                            self.tracker.peer_id, self.piece_manager
+                )
+                new_peer.connect()
+
+                if new_peer.healthy:
+                    self.peers.append(new_peer)
+                else:
+                    print(f"Peer {peer_info[0]}:{peer_info[1]} not healthy, skipping.")
+            except Exception as e:
+                print(f"Error connecting to peer {peer_info}: {e}")
+
+    def initialize_peers(self):
+        # Initialize all peers (send interested and handle bitfield+unchoke)
+        healthy_peers = []
+        for peer in self.peers:
+            if self._initialize_peer(peer):
+                healthy_peers.append(peer)
+            else:
+                print(f"Initialization failed for peer {peer.ip}:{peer.port}")
+        self.peers = healthy_peers
+
+    def _initialize_peer(self, peer: Peer):
+        """
+        Setup the connection for piece requesting, using the following steps:
+        
+        1. Send Interested
+        2. Start Listening for Unchoke and Bitmap/Have messages
+        """
+        try:
+            print(f"Initializing connection with {peer.ip}:{peer.port}")
+            peer.send(message.Interested())
+
+            while True:
+                response = peer.recv()
+                response_message = message.Message.deserialize(response)
+                
+                if isinstance(response_message, message.Unchoke):
+                    peer.handle_unchoke()
+                    print(f"Peer {peer.ip}:{peer.port} unchoke us.")
+                elif isinstance(response_message, message.Bitfield):
+                    peer.handle_bitfield(response_message.bitfield)
+                    print(f"Peer {peer.ip}:{peer.port} sent Bitfield.")
+                elif isinstance(response_message, message.Have):
+                    peer.handle_have()
+                
+                if not peer.is_choking() and peer.bitfield is not None:
+                    return True
+        
+        except Exception as e:
+            print(f"Error initializing peer {peer.ip}:{peer.port}: {e}")
+        return False
+    
+    def download_pieces(self):
+        # Main loop to assign pieces to peers until no assignments can be made.
+        while True:
+            assignment_made = False
+            for peer in self.peers[:]:
+                # Use peer.bitfield if available, or assume the peer has all pieces.
+                peer_bitfield = peer.bitfield if peer.bitfield is not None else None
+                next_piece = self.piece_manager.choose_next_piece(peer_bitfield)
+                if next_piece is not None:
+                    assignment_made = True
+                    expected_length = self.piece_manager.pieces[next_piece].piece_length
+                    print(f"\nStarting download of piece {next_piece} from {peer.ip}:{peer.port}")
+                    if download_piece(peer, next_piece, expected_length):
+                        print(f"✅ Successfully downloaded piece {next_piece}")
+                    else:
+                        print(f"❌ Failed to download piece {next_piece} from {peer.ip}:{peer.port}")
+                        self.peers.remove(peer)
+                else:
+                    print(f"No available piece for peer {peer.ip}:{peer.port}")
+            if not assignment_made:
+                break
+            time.sleep(1)  # Small delay to avoid a tight loop
+        print("All available pieces have been processed. Download complete.")
+
+
 def main(torrent_path: str) -> None:
     # Load torrent metadata and display info
     tor = Torrent()
