@@ -115,6 +115,7 @@ class Peer:
         #     f.seek(block_offset)
         #     f.write(piece.block)
         print(f"📥 Received block for piece {piece.index} at offset {piece.begin}")
+        print(f"Last 20 bytes of data{piece.block[-20:]}")
         self.piece_manager.recieve_block_piece(piece.index, piece.begin, piece.block)
     
     def send(self, message):

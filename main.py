@@ -45,6 +45,7 @@ def download_piece(peer: Peer, piece_index: int, piece_length: int) -> bool:
                     continue
 
                 piece_msg = message.Message.deserialize(response)
+                
 
                 if isinstance(piece_msg, message.Piece):
                     peer.handle_piece(piece_msg)
@@ -117,7 +118,7 @@ class PeerManager:
         self.peers = []
     
 
-    def add_eers(self):
+    def add_peers(self):
         # Create Peer instances from tracker response
         for peer_info in self.tracker.peers_list:
             if peer_info[0] == self.my_ip:
@@ -168,10 +169,10 @@ class PeerManager:
                     peer.handle_unchoke()
                     print(f"Peer {peer.ip}:{peer.port} unchoke us.")
                 elif isinstance(response_message, message.Bitfield):
-                    peer.handle_bitfield(response_message.bitfield)
+                    peer.handle_bitfield(response_message)
                     print(f"Peer {peer.ip}:{peer.port} sent Bitfield.")
                 elif isinstance(response_message, message.Have):
-                    peer.handle_have()
+                    peer.handle_have(response_message)
                 
                 if not peer.is_choking() and peer.bitfield is not None:
                     return True
@@ -187,15 +188,16 @@ class PeerManager:
             for peer in self.peers[:]:
                 # Use peer.bitfield if available, or assume the peer has all pieces.
                 peer_bitfield = peer.bitfield if peer.bitfield is not None else None
-                next_piece = self.piece_manager.choose_next_piece(peer_bitfield)
-                if next_piece is not None:
+                next_piece_idx = self.piece_manager.choose_next_piece(peer_bitfield)
+                if next_piece_idx is not None:
                     assignment_made = True
-                    expected_length = self.piece_manager.pieces[next_piece].piece_length
-                    print(f"\nStarting download of piece {next_piece} from {peer.ip}:{peer.port}")
-                    if download_piece(peer, next_piece, expected_length):
-                        print(f"✅ Successfully downloaded piece {next_piece}")
+                    expected_length = self.piece_manager.pieces[next_piece_idx].piece_length
+                    print(f"\nStarting download of piece {next_piece_idx} from {peer.ip}:{peer.port}")
+                    if download_piece(peer, next_piece_idx, expected_length):
+                        print(f"✅ Successfully downloaded piece {next_piece_idx}")
                     else:
-                        print(f"❌ Failed to download piece {next_piece} from {peer.ip}:{peer.port}")
+                        print(f"❌ Failed to download piece {next_piece_idx} from {peer.ip}:{peer.port}")
+                        self.piece_manager.release_piece(next_piece_idx)
                         self.peers.remove(peer)
                 else:
                     print(f"No available piece for peer {peer.ip}:{peer.port}")
@@ -206,74 +208,23 @@ class PeerManager:
 
 
 def main(torrent_path: str) -> None:
-    # Load torrent metadata and display info
     tor = Torrent()
     tor.load_file(torrent_path)
     tor.display_info()
-    print()
-
-    # Initialize tracker and PieceManager components
+    
     tracker_h = TrackerHandler(tor)
     piece_manager = PieceManager(tor)
-
+    
     tracker_h.send_request()
     print(f"Tracker response: {tracker_h.response}\n")
-
-    # Establish connections with peers
-    real_peers = []
-    for peer_info in tracker_h.peers_list:
-        if peer_info[0] == MY_IP:
-            print("Skipping self")
-            continue
-        try:
-            print(f"Connecting to {peer_info[0]}:{peer_info[1]}")
-            my_peer = Peer(peer_info[0], peer_info[1], tracker_h.info_hash, tracker_h.peer_id, piece_manager=piece_manager)
-            my_peer.connect()
-            if not my_peer.healthy:
-                continue
-            real_peers.append(my_peer)
-            my_peer.sock.settimeout(5)
-        except (socket.error, ValueError) as e:
-            print(f"Connection to {peer_info[0]}:{peer_info[1]} failed: {e}")
-            continue
-
-    if not real_peers:
-        print("No healthy peers found. Exiting.")
-        return
-
-    healthy_peers = []
-    for peer in real_peers:
-        if not initialize_peer(peer):
-            continue
-        healthy_peers.append(peer)
-
-    # Main download loop: assign pieces to peers dynamically
-    while True:
-        assigned = False
-        # Iterate over a copy of the healthy peers list so we can remove peers if needed
-        for peer in healthy_peers[:]:
-            # Use the peer's bitfield if available, otherwise assume the peer has all pieces
-            peer_bitfield = peer.bitfield if hasattr(peer, "bitfield") and peer.bitfield is not None else None
-            next_piece = piece_manager.choose_next_piece(peer_bitfield)
-            if next_piece is not None:
-                assigned = True
-                expected_length = piece_manager.pieces[next_piece].piece_length
-                print(f"\nStarting download of piece {next_piece} (expected length: {expected_length}) from {peer.ip}:{peer.port}")
-                if download_piece(peer, next_piece, expected_length):
-                    print(f"✅ Successfully downloaded piece {next_piece}")
-                else:
-                    print(f"❌ Failed to download piece {next_piece} from {peer.ip}:{peer.port}")
-                    healthy_peers.remove(peer)
-            else:
-                print(f"No available piece for peer {peer.ip}:{peer.port}")
-
-        # If no assignment was made across all peers, break the loop
-        if not assigned:
-            break
-        time.sleep(1)  # small delay to avoid a tight busy loop
-
-    print("\nDownload complete!")
+    
+    peer_manager = PeerManager(tracker_h, piece_manager, MY_IP)
+    peer_manager.add_peers()
+    peer_manager.initialize_peers()
+    peer_manager.download_pieces()
+    
     print(f"Attempted to download all {tor.total_pieces} pieces")
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
