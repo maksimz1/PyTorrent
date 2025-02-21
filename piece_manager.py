@@ -23,7 +23,7 @@ class PieceManager:
         # piece_index, piece_offset, piece_data = piece
         piece:Piece = self.pieces[piece_index]
 
-        piece.add_block(piece_data)
+        piece.add_block(piece_offset, piece_data)
 
         if piece.is_complete():
             print("✅ Download completed! Checking validity...")
@@ -40,20 +40,32 @@ class PieceManager:
                 # Release the piece even if unsuccessful 
                 self.busy_pieces.remove(piece_index)
         else:
-            print(f"Download not complete, current data:{len(piece.raw_data)}")
+            # print(f"Download not complete, current data:{len(piece.raw_data)}")
+            pass
 
 
     def _generate_pieces(self):
-        last_piece = self.number_of_pieces - 1
         piece_length = self.torrent.piece_length
+
+        # If the entire file is smaller than one piece, treat it as one piece.
+        if self.torrent.file_length < piece_length:
+            self.number_of_pieces = 1
+            self.pieces.append(Piece(0, self.torrent.file_length, self.torrent.pieces[:20]))
+            return
+
+        # Otherwise, calculate the last piece length.
+        last_piece_length = self.torrent.file_length - (self.number_of_pieces - 1) * piece_length
+        if last_piece_length <= 0:
+            raise ValueError(f"Inconsistent torrent metadata: calculated last piece length {last_piece_length} is not positive.")
+
         for i in range(self.number_of_pieces):
             start = i * 20
             end = start + 20
+            # Use the standard piece_length for all pieces except the last.
+            current_length = piece_length if i < self.number_of_pieces - 1 else last_piece_length
+            self.pieces.append(Piece(i, current_length, self.torrent.pieces[start:end]))
 
-            if i == last_piece:
-                piece_length = self.torrent.file_length - (self.number_of_pieces - 1) * self.torrent.piece_length
 
-            self.pieces.append(Piece(i, piece_length, self.torrent.pieces[start:end]))
         
     def _validate_piece(self, piece: Piece):
         actual_hash = hashlib.sha1(piece.raw_data).digest()

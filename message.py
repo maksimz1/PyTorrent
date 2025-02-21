@@ -17,7 +17,7 @@ class Message:
             message_id = data[0]
             message_map = cls._build_message_map()
             message_class = message_map.get(message_id)
-            print(f"Deserializng message: {message_class}, {message_id}")
+            # print(f"Deserializng message: {message_class}, {message_id}")
             if not message_class:
                 raise ValueError(f"Invalid message ID: {message_id}")
             return message_class.deserialize_payload(data[1:])
