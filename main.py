@@ -60,7 +60,6 @@ class AsyncPeerManager:
         self.tracker = tracker
         self.piece_manager = piece_manager
         self.my_ip = my_ip
-        self.peers = []
 
     async def _connect_peer(self, peer: Peer):
         await peer.connect()
@@ -70,35 +69,40 @@ class AsyncPeerManager:
             print(f"Peer {peer.ip}:{peer.port} not healthy, skipping.")
             return None
 
+    async def add_peer(self, peer_info):
+        if peer_info[0] == self.my_ip:
+            print("Skipping self.")
+            return
+        peer = Peer(
+            peer_info[0],
+            peer_info[1],
+            self.tracker.info_hash,
+            self.tracker.peer_id,
+            self.piece_manager
+        )
+        connected_peer = await self._connect_peer(peer)
+        if connected_peer:
+            # Spawn a dedicated task to handle this peer immediately.
+            asyncio.create_task(self.handle_peer(connected_peer))
+
     async def add_peers(self):
         tasks = []
         for peer_info in self.tracker.peers_list:
-            if peer_info[0] == self.my_ip:
-                print("Skipping self.")
-                continue
-            peer = Peer(
-                peer_info[0],
-                peer_info[1],
-                self.tracker.info_hash,
-                self.tracker.peer_id,
-                self.piece_manager
-            )
-            tasks.append(asyncio.create_task(self._connect_peer(peer)))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        self.peers = [p for p in results if p is not None and not isinstance(p, Exception)]
-        print(f"Connected peers: {[f'{p.ip}:{p.port}' for p in self.peers]}")
+            tasks.append(asyncio.create_task(self.add_peer(peer_info)))
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def initialize_and_download_peer(self, peer: Peer):
+    async def handle_peer(self, peer: Peer):
         """
-        For a single peer, send the Interested message, wait briefly for an unchoke,
-        and then start downloading pieces immediately—even if no Bitfield is received quickly.
-        Peers are given multiple chances before being dropped.
+        Handle initialization and piece downloading for a single peer.
+        This method can be spawned as an independent task.
         """
         try:
-            # Start initialization by sending Interested.
+            # Send Interested message and negotiate extensions
             await peer.send(message.Interested())
+            # await peer.send_extended_handshake()
+
             start_time = asyncio.get_event_loop().time()
-            # Wait until unchoked; if Bitfield doesn't arrive quickly, assume full availability.
+            # Wait for the peer to unchoke and (optionally) provide a Bitfield.
             while True:
                 if not peer.is_choking():
                     if peer.bitfield is not None:
@@ -110,20 +114,20 @@ class AsyncPeerManager:
                         peer.bitfield = [1] * total
                         break
                 await asyncio.sleep(0.1)
-            
-            # Allow the peer several chances before giving up.
+
+            # Now start downloading pieces from this peer.
             failure_count = 0
-            max_failures = 3  # Allow up to 3 consecutive failures.
+            max_failures = 3
             while True:
                 next_piece = self.piece_manager.choose_next_piece(peer.bitfield)
                 if next_piece is None:
                     print(f"No available piece for peer {peer.ip}:{peer.port}")
                     break
-                expected_length = self.piece_manager.pieces[next_piece].piece_length
+                expected_length = peer.piece_manager.pieces[next_piece].piece_length
                 print(f"\nStarting download of piece {next_piece} from {peer.ip}:{peer.port}")
                 success = await async_download_piece(peer, next_piece, expected_length)
                 if success:
-                    print(f"✅ Successfully downloaded piece {next_piece}")
+                    print(f"✅ Successfully downloaded piece {next_piece} from {peer.ip}:{peer.port}")
                     failure_count = 0  # Reset on success.
                 else:
                     print(f"❌ Failed to download piece {next_piece} from {peer.ip}:{peer.port}")
@@ -139,16 +143,6 @@ class AsyncPeerManager:
         except Exception as e:
             print(f"Error with peer {peer.ip}:{peer.port}: {e}")
 
-
-
-    
-    async def start_downloads(self):
-        """
-        Launch initialization and download tasks for each connected peer concurrently.
-        """
-        tasks = [asyncio.create_task(self.initialize_and_download_peer(peer)) for peer in self.peers]
-        await asyncio.gather(*tasks, return_exceptions=True)
-
 async def async_main(torrent_path: str):
     # Load torrent metadata and display info
     tor = Torrent()
@@ -159,19 +153,18 @@ async def async_main(torrent_path: str):
     tracker = TrackerHandler(tor)
     piece_manager = PieceManager(tor)
 
-    # Run tracker request in a thread (since requests is blocking)
+    # Send tracker request (in a thread since requests is blocking)
     await asyncio.to_thread(tracker.send_request)
     print(f"Tracker response: {tracker.response}\n")
 
-    # Use AsyncPeerManager to add peers and start downloads as soon as each peer is ready.
+    # Create the peer manager and add peers from the tracker.
     peer_manager = AsyncPeerManager(tracker, piece_manager, MY_IP)
     await peer_manager.add_peers()
-    if not peer_manager.peers:
-        print("Exiting because no healthy peers are available.")
-        return
-    await peer_manager.start_downloads()
 
-    print(f"Attempted to download all {tor.total_pieces} pieces")
+    # Optionally, keep the main loop running so new peers (e.g., from PEX) can be handled.
+    while True:
+        await asyncio.sleep(10)
+        # Here you might check for new peers from PEX and call peer_manager.add_peer(new_peer_info)
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
