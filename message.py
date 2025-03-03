@@ -29,11 +29,35 @@ class Message:
     def __init__(self, data):
         pass
 
+class Extended(Message):
+    """Extension message as defined in BEP 10."""
+    message_id = 20  # BitTorrent protocol assigns 20 to extended messages
+    
+    def __init__(self, ext_id: int, payload: bytes = None):
+        super().__init__(None)
+        self.ext_id = ext_id
+        self.payload = payload or b''
+        
+    def serialize(self):
+        """Serialize the message for transmission."""
+        # Length prefix + message_id + extension_id + payload
+        length = (1 + 1 + len(self.payload)).to_bytes(4, byteorder='big')
+        return length + bytes([self.message_id]) + bytes([self.ext_id]) + self.payload
+    
+    @classmethod
+    def deserialize_payload(cls, data):
+        """Deserialize an extended message from raw data."""
+        if not data:
+            return None
+        ext_id = data[0]
+        payload = data[1:]
+        return cls(ext_id, payload)
+
 class Handshake:
     def __init__(self, info_hash, peer_id):
         self.pstr = b'BitTorrent protocol' # Define the protocol, 19 bytes
         self.pstrlen = len(self.pstr)
-        self.reserved = b'\x00\x00\x00\x00\x00\x00\x00\x00'
+        self.reserved = b'\x00\x00\x00\x00\x00\x10\x00\x00'  # Set 5th bit to indicate extension protocol support
         self.info_hash = info_hash
         self.peer_id = peer_id
         
@@ -92,7 +116,7 @@ class Interested(Message):
         return self.payload
     
     @classmethod
-    def deserialize_payload(self, data):
+    def deserialize_payload(cls, data):
         return Interested()
 
 class NotInterested(Message):
@@ -115,7 +139,7 @@ class Have(Message):
     @classmethod
     def deserialize_payload(cls, data):
         if len(data) != 4:
-            raise ValueError("Invalig payload length for Have message")
+            raise ValueError("Invalid payload length for Have message")
         index = int.from_bytes(data, 'big')
         return cls(index)
 

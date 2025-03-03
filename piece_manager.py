@@ -1,114 +1,357 @@
-from piece import Piece
-from torrent import Torrent
-import typing 
-import hashlib
 import os
+import hashlib
+import random
+import time
+from typing import List, Dict, Set, Optional, Tuple, Any
+from torrent import Torrent
+from piece import Piece
 
 class PieceManager:
     def __init__(self, torrent: Torrent):
-        self.pieces: typing.List[Piece] = []
-        self.busy_pieces = set()
+        """Initialize the PieceManager with a torrent file."""
         self.torrent = torrent
+        self.pieces: List[Piece] = []
+        self.busy_pieces: Set[int] = set()  # Pieces currently being downloaded
+        self.completed_pieces: Set[int] = set()  # Successfully downloaded pieces
+        self.failed_attempts: Dict[int, int] = {}  # Track failed attempts per piece
+        self.piece_lock_time: Dict[int, float] = {}  # When piece was marked busy
         self.number_of_pieces = torrent.total_pieces
-
-        self._generate_pieces()
-
+        
+        # Stats for debugging
+        self.stats = {
+            "pieces_selected": 0,
+            "pieces_completed": 0,
+            "pieces_failed": 0,
+            "pieces_validated": 0,
+            "pieces_invalid": 0
+        }
+        
         # Load expected hashes from the torrent metadata
         self.expected_hashes = [
             torrent.pieces[i * 20:(i + 1) * 20]
             for i in range(torrent.total_pieces)
         ]
+        
+        # Create the directory for piece files if it doesn't exist
+        if not os.path.exists("file_pieces"):
+            os.makedirs("file_pieces", exist_ok=True)
+        
+        # Initialize piece objects
+        self._generate_pieces()
+        
+        # Load any already downloaded pieces
+        self._load_completed_pieces()
+        
+        print(f"PieceManager initialized with {self.number_of_pieces} pieces.")
+        print(f"Loaded {len(self.completed_pieces)} already completed pieces.")
 
-    def recieve_block_piece(self, piece_index, piece_offset, piece_data):
-        # piece_index, piece_offset, piece_data = piece
-        piece:Piece = self.pieces[piece_index]
+    def _generate_pieces(self):
+        """Create Piece objects for all pieces in the torrent with proper length validation."""
+        piece_length = self.torrent.piece_length
+        file_length = self.torrent.file_length
+        
+        # Add debug info to help diagnose the issue
+        print(f"\nPiece generation details:")
+        print(f"- File length: {file_length} bytes")
+        print(f"- Piece length: {piece_length} bytes")
+        print(f"- Total pieces in torrent: {self.torrent.total_pieces}")
+        
+        # Validate inputs
+        if piece_length <= 0:
+            print(f"Warning: Invalid piece length ({piece_length}), using default of 16384 bytes")
+            piece_length = 16384  # Default to 16KB if invalid
+        
+        if file_length <= 0:
+            print(f"Warning: Invalid file length ({file_length}), cannot create pieces")
+            return
+        
+        # Calculate the correct number of pieces based on file and piece length
+        calculated_pieces = (file_length + piece_length - 1) // piece_length
+        if calculated_pieces != self.number_of_pieces:
+            print(f"Warning: Expected {calculated_pieces} pieces based on file size, but metadata has {self.number_of_pieces}")
+            self.number_of_pieces = calculated_pieces
+        
+        # Create pieces with proper lengths
+        for i in range(self.number_of_pieces):
+            # For all pieces except the last one, use the standard piece length
+            if i < self.number_of_pieces - 1:
+                current_length = piece_length
+            else:
+                # Calculate the correct length for the last piece
+                last_piece_length = file_length - (self.number_of_pieces - 1) * piece_length
+                current_length = last_piece_length if last_piece_length > 0 else piece_length
+            
+            # Ensure we have a hash for this piece
+            if i*20 + 20 <= len(self.torrent.pieces):
+                piece_hash = self.torrent.pieces[i*20:(i+1)*20]
+            else:
+                print(f"Warning: Missing hash for piece {i}, using zeros")
+                piece_hash = b'\x00' * 20
+            
+            # Create the piece
+            self.pieces.append(Piece(i, current_length, piece_hash))
+        
+        # Verify all pieces have non-zero length
+        zero_length_pieces = [p.piece_index for p in self.pieces if p.piece_length <= 0]
+        if zero_length_pieces:
+            print(f"Warning: {len(zero_length_pieces)} pieces still have zero length")
+        else:
+            print(f"Successfully created {len(self.pieces)} pieces with valid lengths")
+            
+    def _load_completed_pieces(self):
+        """Check for already downloaded pieces and mark them as completed."""
+        for piece in self.pieces:
+            if self.is_piece_downloaded(piece):
+                self.completed_pieces.add(piece.piece_index)
+                self.stats["pieces_completed"] += 1
 
+    def recieve_block_piece(self, piece_index: int, piece_offset: int, piece_data: bytes):
+        """Process a received block of a piece."""
+        if piece_index >= len(self.pieces):
+            print(f"Error: Received invalid piece index {piece_index}")
+            return
+            
+        piece = self.pieces[piece_index]
         piece.add_block(piece_offset, piece_data)
 
         if piece.is_complete():
-            print("✅ Download completed! Checking validity...")
-            # Validate the piece integrity
+            print(f"✅ Piece {piece_index} block download completed. Validating...")
             if self._validate_piece(piece):
-                print(f"✅ Piece {piece_index} completed and verified! Writing to disk...")
+                print(f"✅ Piece {piece_index} validated successfully! Writing to disk...")
                 with open(f"file_pieces/{piece_index}.part", 'wb') as f:
                     f.write(piece.raw_data)
-                self.busy_pieces.remove(piece_index)
                 
-            else: 
+                # Mark as completed and remove from busy set
+                self.completed_pieces.add(piece_index)
+                self.busy_pieces.discard(piece_index)
+                self.stats["pieces_completed"] += 1
+                self.stats["pieces_validated"] += 1
+            else:
                 print(f"❌ Hash mismatch for piece {piece_index}. Retrying...")
-                piece.flush() # Reset piece and redownload
-                # Release the piece even if unsuccessful 
-                self.busy_pieces.remove(piece_index)
-        else:
-            # print(f"Download not complete, current data:{len(piece.raw_data)}")
-            pass
+                piece.flush()  # Reset piece for redownload
+                self.busy_pieces.discard(piece_index)  # Release the piece
+                self.stats["pieces_invalid"] += 1
+                
+                # Track failed attempts
+                self.failed_attempts[piece_index] = self.failed_attempts.get(piece_index, 0) + 1
 
-
-    def _generate_pieces(self):
-        piece_length = self.torrent.piece_length
-
-        # If the entire file is smaller than one piece, treat it as one piece.
-        if self.torrent.file_length < piece_length:
-            self.number_of_pieces = 1
-            self.pieces.append(Piece(0, self.torrent.file_length, self.torrent.pieces[:20]))
-            return
-
-        # Otherwise, calculate the last piece length.
-        last_piece_length = self.torrent.file_length - (self.number_of_pieces - 1) * piece_length
-        if last_piece_length <= 0:
-            raise ValueError(f"Inconsistent torrent metadata: calculated last piece length {last_piece_length} is not positive.")
-
-        for i in range(self.number_of_pieces):
-            start = i * 20
-            end = start + 20
-            # Use the standard piece_length for all pieces except the last.
-            current_length = piece_length if i < self.number_of_pieces - 1 else last_piece_length
-            self.pieces.append(Piece(i, current_length, self.torrent.pieces[start:end]))
-
-
-        
-    def _validate_piece(self, piece: Piece):
+    def _validate_piece(self, piece: Piece) -> bool:
+        """Validate piece data against expected hash."""
         actual_hash = hashlib.sha1(piece.raw_data).digest()
         return actual_hash == piece.piece_hash
-    
+
     def is_piece_downloaded(self, piece: Piece) -> bool:
-        """
-        Checks if the file {index}.part exists, and if it exists, verify the contents
-        """
+        """Check if a piece has already been successfully downloaded to disk."""
         piece_path = f"file_pieces/{piece.piece_index}.part"
         if not os.path.exists(piece_path):
             return False
         
-        with open(piece_path, 'rb') as f:
-            data = f.read()
+        try:
+            with open(piece_path, 'rb') as f:
+                data = f.read()
 
-        if len(data) != piece.piece_length:
+            # Check file size matches expected length
+            if len(data) != piece.piece_length:
+                return False
+
+            # Validate hash
+            if hashlib.sha1(data).digest() != piece.piece_hash:
+                # Invalid hash, file might be corrupt
+                os.remove(piece_path)
+                return False
+
+            return True
+        except Exception as e:
+            print(f"Error checking piece {piece.piece_index}: {e}")
             return False
 
-        if hashlib.sha1(data).digest() != piece.piece_hash:
-            return False
-
-        return True
-
-    def choose_next_piece(self, peer_bifield = None):
+    def choose_next_piece(self, peer_bitfield=None):
         """
-        Selects next piece to download.
-
-        To be ran by the PeerManager when ordering a peer to download a piece
+        Select the next piece to download based on availability and rarity.
+        Includes validation to prevent selecting invalid pieces.
         """
-        for piece in self.pieces:
-            if piece.is_complete():
+        # Identify all candidate pieces
+        candidates = []
+        
+        for piece_index in range(len(self.pieces)):
+            piece = self.pieces[piece_index]
+            
+            # Skip pieces with invalid length
+            if piece.piece_length <= 0:
                 continue
-            if self.is_piece_downloaded(piece):
+            
+            # Skip completed pieces
+            if piece_index in self.completed_pieces:
                 continue
-            if piece.piece_index in self.busy_pieces:
+                
+            # Skip busy pieces
+            if piece_index in self.busy_pieces:
                 continue
-            if peer_bifield is not None:
-                if not peer_bifield[piece.piece_index]:
+                
+            # Check if peer has this piece
+            if peer_bitfield is not None:
+                # Handle different bitfield formats
+                has_piece = False
+                
+                # Handle case where bitfield is shorter than piece count
+                if piece_index >= len(peer_bitfield):
+                    continue
+                
+                if hasattr(peer_bitfield, 'bin'):  # BitArray format
+                    if piece_index < len(peer_bitfield.bin):
+                        has_piece = peer_bitfield.bin[piece_index] == '1'
+                else:  # List/array format
+                    has_piece = bool(peer_bitfield[piece_index])
+                    
+                if not has_piece:
                     continue
             
-            self.busy_pieces.add(piece.piece_index)
-            return piece.piece_index
+            # Add to candidates with a priority score
+            priority = 1.0
+            
+            # Reduce priority for pieces with previous failures
+            if piece_index in self.failed_attempts:
+                failures = self.failed_attempts[piece_index]
+                priority *= (0.8 ** failures)  # Exponential backoff
+            
+            candidates.append((piece_index, priority))
+        
+        if not candidates:
+            # Release any pieces locked for too long (over 2 minutes)
+            current_time = time.time()
+            for piece_index, lock_time in list(self.piece_lock_time.items()):
+                if current_time - lock_time > 120:  # 2 minutes
+                    print(f"Auto-releasing piece {piece_index} locked for too long")
+                    self.release_piece(piece_index)
+            return None
+        
+        # Select a piece using weighted random choice based on priority
+        total_priority = sum(priority for _, priority in candidates)
+        r = random.random() * total_priority
+        
+        cumulative = 0
+        for piece_index, priority in candidates:
+            cumulative += priority
+            if cumulative >= r:
+                # Final validation check
+                piece = self.pieces[piece_index]
+                
+                # Mark the piece as busy
+                self.busy_pieces.add(piece_index)
+                self.piece_lock_time[piece_index] = time.time()
+                self.stats["pieces_selected"] += 1
+                
+                # Debug output
+                print(f"Selected piece {piece_index} (length: {piece.piece_length}, priority: {priority:.2f})")
+                return piece_index
+        
+        # If we reach here, just use the first candidate
+        if candidates:
+            selected = candidates[0][0]
+            self.busy_pieces.add(selected)
+            self.piece_lock_time[selected] = time.time()
+            self.stats["pieces_selected"] += 1
+            return selected
+        
+        return None
+    
+    def release_piece(self, piece_index: int):
+        """Release a busy piece so it can be downloaded by another peer."""
+        if piece_index in self.busy_pieces:
+            self.busy_pieces.discard(piece_index)
+            if piece_index in self.piece_lock_time:
+                del self.piece_lock_time[piece_index]
+            self.stats["pieces_failed"] += 1
+            print(f"Released piece {piece_index} for re-download")
 
-    def release_piece(self, busy_piece_index):
-        self.busy_pieces.discard(busy_piece_index)
+    def get_progress(self) -> float:
+        """Calculate current download progress as a percentage."""
+        if not self.pieces:
+            return 0.0
+        
+        return (len(self.completed_pieces) / len(self.pieces)) * 100.0
+
+    def is_complete(self) -> bool:
+        """Check if all pieces have been downloaded successfully."""
+        return len(self.completed_pieces) == len(self.pieces)
+
+    def get_missing_pieces(self) -> List[int]:
+        """Get indices of pieces that haven't been completed yet."""
+        return [i for i in range(len(self.pieces)) if i not in self.completed_pieces]
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get detailed statistics about the download state."""
+        stats = self.stats.copy()
+        stats.update({
+            "total_pieces": len(self.pieces),
+            "completed_pieces": len(self.completed_pieces),
+            "busy_pieces": len(self.busy_pieces),
+            "remaining_pieces": len(self.pieces) - len(self.completed_pieces),
+            "progress_percentage": self.get_progress(),
+            "is_complete": self.is_complete()
+        })
+        return stats
+
+    def debug_status(self, peer_bitfield=None, peer_info=None):
+        """Print detailed debug information about the piece manager state."""
+        stats = self.get_stats()
+        
+        print("\n=== Piece Manager Status ===")
+        print(f"Total pieces: {stats['total_pieces']}")
+        print(f"Completed: {stats['completed_pieces']} ({stats['progress_percentage']:.2f}%)")
+        print(f"Busy: {stats['busy_pieces']}")
+        print(f"Remaining: {stats['remaining_pieces']}")
+        
+        if peer_info and peer_bitfield:
+            peer_ip, peer_port = peer_info
+            available_count = 0
+            
+            if peer_bitfield:
+                for i in range(min(len(peer_bitfield), len(self.pieces))):
+                    piece_index = i
+                    
+                    # Skip completed pieces
+                    if piece_index in self.completed_pieces:
+                        continue
+                        
+                    # Skip busy pieces
+                    if piece_index in self.busy_pieces:
+                        continue
+                    
+                    # Check if peer has this piece
+                    has_piece = False
+                    if hasattr(peer_bitfield, 'bin'):  # BitArray
+                        if i < len(peer_bitfield.bin):
+                            has_piece = peer_bitfield.bin[i] == '1'
+                    else:  # List/array
+                        has_piece = bool(peer_bitfield[i])
+                    
+                    if has_piece:
+                        available_count += 1
+            
+            print(f"\nPieces available from peer {peer_ip}:{peer_port}: {available_count}")
+            
+            if available_count == 0 and len(self.busy_pieces) > 0:
+                busy_and_available = 0
+                if peer_bitfield:
+                    for piece_index in self.busy_pieces:
+                        if piece_index < len(peer_bitfield):
+                            has_piece = False
+                            if hasattr(peer_bitfield, 'bin'):  # BitArray
+                                has_piece = peer_bitfield.bin[piece_index] == '1'
+                            else:  # List/array
+                                has_piece = bool(peer_bitfield[piece_index])
+                            
+                            if has_piece:
+                                busy_and_available += 1
+                
+                print(f"Pieces both busy and available from this peer: {busy_and_available}")
+                if busy_and_available > 0:
+                    print("Consider releasing some busy pieces to allow downloading")
+        
+        print("\nDetailed Statistics:")
+        for key, value in stats.items():
+            if key not in ["total_pieces", "completed_pieces", "busy_pieces", "remaining_pieces", "progress_percentage", "is_complete"]:
+                print(f"  - {key}: {value}")
+                
+        return stats

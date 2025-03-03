@@ -1,6 +1,19 @@
 import asyncio
+import socket
+import struct
+import bencodepy
+import time
 from message import Message
 import message
+import hashlib
+import traceback
+
+# Extension message IDs (BEP 10)
+EXT_HANDSHAKE_ID = 0
+UT_PEX_ID = 1  # Default ID for PEX
+
+# PEX settings
+PEX_INTERVAL = 45  # Send PEX messages every 45 seconds
 
 class Peer:
     def __init__(self, ip: str, port: int, info_hash, peer_id, piece_manager) -> None:
@@ -20,10 +33,23 @@ class Peer:
         self.bitfield = None
         self.piece_manager = piece_manager
 
-        # New: Queue to store incoming Piece messages
+        # Queue to store incoming Piece messages
         self.incoming_queue = asyncio.Queue()
         # Listener task for continuously reading messages
         self.listener_task = None
+        
+        # PEX support
+        self.supports_pex = False
+        self.ut_pex_id = UT_PEX_ID  # Default to standard ID of 1
+        self.last_pex_sent = 0
+        self.sent_peers = set()
+        self.pex_interval = PEX_INTERVAL
+        
+        # Source tracking for stats
+        self.source = "unknown"
+        
+        # Reference to peer manager (set after creation)
+        self.pex_manager = None
 
     async def connect(self):
         try:
@@ -35,8 +61,8 @@ class Peer:
             await self._send_handshake()
             response = await self._recv_handshake()
             parsed_response = self._parse_handshake(response)
-            # print(f"Parsed handshake: {parsed_response}")
             print(f"🤝 Parsed handshake from: {self.ip}:{self.port}")
+            
             # Start the continuous listener for incoming messages
             self.listener_task = asyncio.create_task(self.listen_for_messages())
         except Exception as e:
@@ -66,31 +92,64 @@ class Peer:
                 # Read the first 4 bytes for the message size
                 size_bytes = await self.reader.readexactly(4)
                 size = int.from_bytes(size_bytes, 'big')
+                
+                if size == 0:
+                    # Keep-alive message, ignore
+                    continue
+                    
                 # Now read the full message based on the size
                 data = await self.reader.readexactly(size)
+                
+                # Check for extended message type (20)
+                if size > 0 and data[0] == 20:  # Extended message
+                    ext_id = data[1]
+                    payload = data[2:]
+                    
+                    if ext_id == EXT_HANDSHAKE_ID:
+                        # Extended handshake
+                        self.process_extended_handshake(payload)
+                    elif ext_id == self.ut_pex_id:  # Handle PEX message with configured ID
+                        # Process as PEX message
+                        new_peers = self.process_pex_message(payload)
+                        if new_peers and self.pex_manager:
+                            # Add all new peers to the known peers list
+                            for ip, port in new_peers:
+                                self.pex_manager.add_peer(ip, port, source="pex")
+                            
+                            # Trigger immediate connection to the new peers
+                            asyncio.create_task(self.pex_manager.connect_to_pex_peers(new_peers))
+                    else:
+                        print(f"Ignoring unknown extended message: {ext_id}")
+                    continue
+                    
+                # Handle standard BitTorrent messages
+                msg = Message.deserialize(data)
+                
+                # Dispatch messages based on their type
+                if isinstance(msg, message.Unchoke):
+                    self.handle_unchoke()
+                    print(f"Peer {self.ip}:{self.port} unchoked us.")
+                elif isinstance(msg, message.Bitfield):
+                    self.handle_bitfield(msg)
+                    print(f"Peer {self.ip}:{self.port} sent Bitfield.")
+                elif isinstance(msg, message.Have):
+                    self.handle_have(msg)
+                elif isinstance(msg, message.Piece):
+                    # Enqueue Piece messages for download responses
+                    await self.incoming_queue.put(msg)
+                else:
+                    print(f"Received unexpected message type: {type(msg)}")
+            except asyncio.TimeoutError:
+                # Timeouts are normal for idle connections
+                pass
+            except asyncio.IncompleteReadError as e:
+                print(f"Connection closed with {self.ip}:{self.port}: {e}")
+                break
             except Exception as e:
                 print(f"Error in listening from {self.ip}:{self.port}: {e}")
-                
-                # Check if the error is Win 10053(Conenction aborted)
-                if "10053" in str(e):
-                    print(f"Detected Win 10053 error for {self.ip}:{self.port}, scheduling reconnect")
-                    await self.reconnect()
-                break  # Exit the loop on error or disconnection
-            msg = Message.deserialize(data)
-            # Dispatch unsolicited control messages immediately
-            if isinstance(msg, message.Unchoke):
-                self.handle_unchoke()
-                print(f"Peer {self.ip}:{self.port} unchoked us.")
-            elif isinstance(msg, message.Bitfield):
-                self.handle_bitfield(msg)
-                print(f"Peer {self.ip}:{self.port} sent Bitfield.")
-            elif isinstance(msg, message.Have):
-                self.handle_have(msg)
-            elif isinstance(msg, message.Piece):
-                # Enqueue Piece messages for download responses
-                await self.incoming_queue.put(msg)
-            else:
-                print(f"Received unexpected message type: {type(msg)}")
+                # Print stack trace for unexpected errors
+                traceback.print_exc()
+                break
 
     async def get_piece_message(self, expected_piece_index, expected_offset, timeout=5):
         """
@@ -108,8 +167,11 @@ class Peer:
                       f"expected piece {expected_piece_index} at offset {expected_offset}")
 
     async def _send_handshake(self):
+        """Send handshake with extension protocol support."""
         protocol = b'BitTorrent protocol'
-        reserved = b'\x00' * 8
+        # Set 5th bit in reserved bytes to indicate support for extension protocol (BEP 10)
+        reserved = b'\x00\x00\x00\x00\x00\x10\x00\x00'
+        
         handshake = (
             bytes([len(protocol)]) +
             protocol +
@@ -131,12 +193,19 @@ class Peer:
         reserved = response[1+pstrlen:1+pstrlen+8]
         info_hash = response[1+pstrlen+8:1+pstrlen+8+20]
         peer_id = response[1+pstrlen+8+20:]
+        
+        # Check if peer supports extension protocol (5th bit in reserved bytes)
+        supports_extensions = bool(reserved[5] & 0x10)
+        if supports_extensions:
+            print(f"Peer {self.ip}:{self.port} supports extension protocol")
+        
         return {
             'pstrlen': pstrlen,
             'pstr': pstr,
             'reserved': reserved,
             'info_hash': info_hash,
-            'peer_id': peer_id
+            'peer_id': peer_id,
+            'supports_extensions': supports_extensions
         }
 
     async def request_piece(self, index, begin, length):
@@ -183,3 +252,149 @@ class Peer:
 
     def am_interested(self):
         return self.state['am_interested']
+    
+    # PEX specific methods
+    async def send_extended_handshake(self):
+        """Send an extended handshake message to negotiate PEX."""
+        try:
+            # Create the handshake dictionary
+            handshake_dict = {
+                b'm': {b'ut_pex': UT_PEX_ID},  # We support ut_pex with ID 1
+                b'v': b'PythonBitTorrent/1.0',
+                b'p': 6881,  # Listening port
+            }
+            
+            # Encode the dictionary
+            payload = bencodepy.encode(handshake_dict)
+            
+            # Create and send the extended message
+            ext_msg = message.Extended(EXT_HANDSHAKE_ID, payload)
+            await self.send(ext_msg)
+            print(f"Sent extended handshake to {self.ip}:{self.port}")
+            return True
+        except Exception as e:
+            print(f"Error sending extended handshake to {self.ip}:{self.port}: {e}")
+            return False
+    
+    def process_extended_handshake(self, payload: bytes):
+        """Process an extended handshake message from the peer."""
+        try:
+            handshake_dict = bencodepy.decode(payload)
+            
+            client_name = handshake_dict.get(b'v', b'unknown')
+            if isinstance(client_name, bytes):
+                client_name = client_name.decode('utf-8', errors='replace')
+            
+            print(f"Received extended handshake from {self.ip}:{self.port} ({client_name})")
+            
+            # Check if the peer supports PEX
+            if b'm' in handshake_dict and b'ut_pex' in handshake_dict[b'm']:
+                self.supports_pex = True
+                self.ut_pex_id = handshake_dict[b'm'][b'ut_pex']
+                print(f"Peer {self.ip}:{self.port} supports PEX (ID: {self.ut_pex_id})")
+                return True
+            else:
+                # Many clients support PEX with ID 1 by default, even if not explicitly stated
+                self.supports_pex = True  # Assume support for PEX with default ID
+                print(f"Peer {self.ip}:{self.port} assumed to support PEX with default ID")
+                return True
+        except Exception as e:
+            print(f"Error parsing extended handshake: {e}")
+            return False
+    
+    async def send_pex_message(self, added_peers, my_ip):
+        """Send a PEX message with new peers."""
+        if not self.supports_pex:
+            return
+        
+        # Filter out peers we've already sent to this peer and ourselves
+        new_peers = []
+        for ip, port in added_peers:
+            if (ip, port) in self.sent_peers:
+                continue
+            if ip == my_ip:  # Don't send ourselves
+                continue
+            try:
+                # Validate IP and port
+                socket.inet_aton(ip)
+                if not isinstance(port, int) or port <= 0 or port > 65535:
+                    continue
+                new_peers.append((ip, port))
+            except:
+                continue
+        
+        if not new_peers:
+            return
+        
+        # Update the sent peers set
+        self.sent_peers.update(new_peers)
+        
+        # Convert peers to compact format
+        added_bytes = b''
+        for ip, port in new_peers:
+            try:
+                packed_ip = socket.inet_aton(ip)
+                packed_port = struct.pack('>H', port)
+                added_bytes += packed_ip + packed_port
+            except Exception as e:
+                print(f"Error packing peer {ip}:{port}: {e}")
+                continue
+        
+        # Create the PEX dictionary
+        pex_dict = {b'added': added_bytes}
+        
+        # Encode the dictionary
+        payload = bencodepy.encode(pex_dict)
+        
+        # Create and send the extended message
+        ext_msg = message.Extended(self.ut_pex_id, payload)
+        await self.send(ext_msg)
+        
+        self.last_pex_sent = time.time()
+        print(f"Sent PEX message to {self.ip}:{self.port} with {len(new_peers)} new peers")
+    
+    def process_pex_message(self, payload: bytes):
+        """Process a PEX message from the peer."""
+        try:
+            pex_dict = bencodepy.decode(payload)
+            
+            added_peers = []
+            if b'added' in pex_dict:
+                added_bytes = pex_dict[b'added']
+                
+                # Process 6-byte chunks (4 for IP, 2 for port)
+                for i in range(0, len(added_bytes), 6):
+                    if i + 6 <= len(added_bytes):
+                        try:
+                            ip = socket.inet_ntoa(added_bytes[i:i+4])
+                            port = struct.unpack('>H', added_bytes[i+4:i+6])[0]
+                            
+                            # Skip invalid IPs and ports
+                            if ip == "0.0.0.0" or port <= 0 or port > 65535:
+                                continue
+                                
+                            added_peers.append((ip, port))
+                        except Exception as e:
+                            print(f"Error unpacking peer: {e}")
+                        
+                # Also handle 'added.f' (encrypted connections) if present
+                if b'added.f' in pex_dict:
+                    print("PEX message contains encrypted peer flags (added.f)")
+            
+            # Handle dropped peers if present
+            if b'dropped' in pex_dict:
+                dropped_bytes = pex_dict[b'dropped']
+                dropped_count = len(dropped_bytes) // 6
+                print(f"PEX message contains {dropped_count} dropped peers")
+            
+            print(f"Received PEX message from {self.ip}:{self.port} with {len(added_peers)} peers")
+            if added_peers:
+                for ip, port in added_peers[:5]:  # Print first 5 peers
+                    print(f"  - {ip}:{port}")
+                if len(added_peers) > 5:
+                    print(f"  - ... and {len(added_peers) - 5} more")
+                    
+            return added_peers
+        except Exception as e:
+            print(f"Error parsing PEX message: {e}")
+            return []
