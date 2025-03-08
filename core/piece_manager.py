@@ -3,8 +3,8 @@ import hashlib
 import random
 import time
 from typing import List, Dict, Set, Optional, Tuple, Any
-from torrent import Torrent
-from piece import Piece
+from core.torrent import Torrent
+from core.piece import Piece
 
 class PieceManager:
     def __init__(self, torrent: Torrent):
@@ -23,7 +23,9 @@ class PieceManager:
             "pieces_completed": 0,
             "pieces_failed": 0,
             "pieces_validated": 0,
-            "pieces_invalid": 0
+            "pieces_invalid": 0,
+            "last_completed_time": time.time(),  # Track when the last piece was completed
+            "download_rate_pieces": 0  # For tracking download speed
         }
         
         # Load expected hashes from the torrent metadata
@@ -115,9 +117,15 @@ class PieceManager:
         piece.add_block(piece_offset, piece_data)
 
         if piece.is_complete():
-            print(f"✅ Piece {piece_index} block download completed. Validating...")
+            # Use simpler output - just indicate completion and validation
             if self._validate_piece(piece):
-                print(f"✅ Piece {piece_index} validated successfully! Writing to disk...")
+                # Track speed
+                now = time.time()
+                time_since_last = now - self.stats["last_completed_time"]
+                self.stats["last_completed_time"] = now
+                self.stats["download_rate_pieces"] = 1.0 / time_since_last if time_since_last > 0 else 0
+                
+                # Save the piece to disk
                 with open(f"file_pieces/{piece_index}.part", 'wb') as f:
                     f.write(piece.raw_data)
                 
@@ -126,6 +134,22 @@ class PieceManager:
                 self.busy_pieces.discard(piece_index)
                 self.stats["pieces_completed"] += 1
                 self.stats["pieces_validated"] += 1
+                
+                # Calculate and display progress
+                progress = self.get_progress()
+                print(f"✅ Piece {piece_index} validated and saved. Progress: {progress:.2f}%")
+                
+                # Calculate ETA if we have download rate
+                if self.stats["download_rate_pieces"] > 0:
+                    remaining_pieces = self.number_of_pieces - len(self.completed_pieces)
+                    eta_seconds = remaining_pieces / self.stats["download_rate_pieces"]
+                    if eta_seconds < 60:
+                        eta = f"{eta_seconds:.0f} seconds"
+                    elif eta_seconds < 3600:
+                        eta = f"{eta_seconds/60:.1f} minutes"
+                    else:
+                        eta = f"{eta_seconds/3600:.1f} hours"
+                    print(f"   Current rate: {self.stats['download_rate_pieces']:.2f} pieces/sec, ETA: {eta}")
             else:
                 print(f"❌ Hash mismatch for piece {piece_index}. Retrying...")
                 piece.flush()  # Reset piece for redownload
@@ -241,8 +265,7 @@ class PieceManager:
                 self.piece_lock_time[piece_index] = time.time()
                 self.stats["pieces_selected"] += 1
                 
-                # Debug output
-                print(f"Selected piece {piece_index} (length: {piece.piece_length}, priority: {priority:.2f})")
+                # No debugging information to reduce verbosity
                 return piece_index
         
         # If we reach here, just use the first candidate
@@ -293,65 +316,25 @@ class PieceManager:
         return stats
 
     def debug_status(self, peer_bitfield=None, peer_info=None):
-        """Print detailed debug information about the piece manager state."""
+        """Print simplified status report."""
         stats = self.get_stats()
         
         print("\n=== Piece Manager Status ===")
         print(f"Total pieces: {stats['total_pieces']}")
         print(f"Completed: {stats['completed_pieces']} ({stats['progress_percentage']:.2f}%)")
-        print(f"Busy: {stats['busy_pieces']}")
+        print(f"Busy pieces: {stats['busy_pieces']}")
         print(f"Remaining: {stats['remaining_pieces']}")
         
-        if peer_info and peer_bitfield:
-            peer_ip, peer_port = peer_info
-            available_count = 0
-            
-            if peer_bitfield:
-                for i in range(min(len(peer_bitfield), len(self.pieces))):
-                    piece_index = i
-                    
-                    # Skip completed pieces
-                    if piece_index in self.completed_pieces:
-                        continue
-                        
-                    # Skip busy pieces
-                    if piece_index in self.busy_pieces:
-                        continue
-                    
-                    # Check if peer has this piece
-                    has_piece = False
-                    if hasattr(peer_bitfield, 'bin'):  # BitArray
-                        if i < len(peer_bitfield.bin):
-                            has_piece = peer_bitfield.bin[i] == '1'
-                    else:  # List/array
-                        has_piece = bool(peer_bitfield[i])
-                    
-                    if has_piece:
-                        available_count += 1
-            
-            print(f"\nPieces available from peer {peer_ip}:{peer_port}: {available_count}")
-            
-            if available_count == 0 and len(self.busy_pieces) > 0:
-                busy_and_available = 0
-                if peer_bitfield:
-                    for piece_index in self.busy_pieces:
-                        if piece_index < len(peer_bitfield):
-                            has_piece = False
-                            if hasattr(peer_bitfield, 'bin'):  # BitArray
-                                has_piece = peer_bitfield.bin[piece_index] == '1'
-                            else:  # List/array
-                                has_piece = bool(peer_bitfield[piece_index])
-                            
-                            if has_piece:
-                                busy_and_available += 1
-                
-                print(f"Pieces both busy and available from this peer: {busy_and_available}")
-                if busy_and_available > 0:
-                    print("Consider releasing some busy pieces to allow downloading")
+        # Calculate and display ETA if we have download rate
+        if stats["download_rate_pieces"] > 0:
+            remaining_pieces = stats['remaining_pieces']
+            eta_seconds = remaining_pieces / stats["download_rate_pieces"]
+            if eta_seconds < 60:
+                eta = f"{eta_seconds:.0f} seconds"
+            elif eta_seconds < 3600:
+                eta = f"{eta_seconds/60:.1f} minutes"
+            else:
+                eta = f"{eta_seconds/3600:.1f} hours"
+            print(f"Current rate: {stats['download_rate_pieces']:.2f} pieces/sec, ETA: {eta}")
         
-        print("\nDetailed Statistics:")
-        for key, value in stats.items():
-            if key not in ["total_pieces", "completed_pieces", "busy_pieces", "remaining_pieces", "progress_percentage", "is_complete"]:
-                print(f"  - {key}: {value}")
-                
         return stats

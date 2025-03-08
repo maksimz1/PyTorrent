@@ -3,7 +3,7 @@ import requests
 import bencodepy
 import random
 import socket
-from torrent import Torrent
+from core.torrent import Torrent
 
 
 class TrackerHandler:
@@ -18,11 +18,11 @@ class TrackerHandler:
 
         self.info_hash = hashlib.sha1(bencodepy.encode(self.torrent.info_dict)).digest()
         self.peers_list = []
+        self.response = None
     
     def generate_peer_id(self):
         # Generate a 20-byte peer ID, e.g., -PYTHONCLIENT-00001
         return "-PYTORRENT-" + "".join(str(random.randint(0, 9)) for _ in range(9))
-
 
     # Method to build the request 
     def build_tracker_url(self, event:str = None):
@@ -56,7 +56,6 @@ class TrackerHandler:
                 tracker_response = bencodepy.decode(response.content)
                 self.response = tracker_response
                 self.parse_tracker_response(tracker_response)
-
             else:
                 print(f"Tracker request failed: HTTP {response.status_code}")
         except requests.RequestException as e:

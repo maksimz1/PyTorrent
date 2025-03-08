@@ -3,8 +3,8 @@ import socket
 import struct
 import bencodepy
 import time
-from message import Message
-import message
+from protocol.message import Message
+import protocol.message as message
 import hashlib
 import traceback
 
@@ -61,7 +61,7 @@ class Peer:
             await self._send_handshake()
             response = await self._recv_handshake()
             parsed_response = self._parse_handshake(response)
-            print(f"🤝 Parsed handshake from: {self.ip}:{self.port}")
+            print(f"🤝 Handshake with {self.ip}:{self.port} successful")
             
             # Start the continuous listener for incoming messages
             self.listener_task = asyncio.create_task(self.listen_for_messages())
@@ -119,7 +119,8 @@ class Peer:
                             # Trigger immediate connection to the new peers
                             asyncio.create_task(self.pex_manager.connect_to_pex_peers(new_peers))
                     else:
-                        print(f"Ignoring unknown extended message: {ext_id}")
+                        # Just log the message type but don't print details
+                        pass
                     continue
                     
                 # Handle standard BitTorrent messages
@@ -128,17 +129,13 @@ class Peer:
                 # Dispatch messages based on their type
                 if isinstance(msg, message.Unchoke):
                     self.handle_unchoke()
-                    print(f"Peer {self.ip}:{self.port} unchoked us.")
                 elif isinstance(msg, message.Bitfield):
                     self.handle_bitfield(msg)
-                    print(f"Peer {self.ip}:{self.port} sent Bitfield.")
                 elif isinstance(msg, message.Have):
                     self.handle_have(msg)
                 elif isinstance(msg, message.Piece):
                     # Enqueue Piece messages for download responses
                     await self.incoming_queue.put(msg)
-                else:
-                    print(f"Received unexpected message type: {type(msg)}")
             except asyncio.TimeoutError:
                 # Timeouts are normal for idle connections
                 pass
@@ -147,8 +144,8 @@ class Peer:
                 break
             except Exception as e:
                 print(f"Error in listening from {self.ip}:{self.port}: {e}")
-                # Print stack trace for unexpected errors
-                traceback.print_exc()
+                # Print stack trace for unexpected errors in debug mode only
+                # traceback.print_exc()
                 break
 
     async def get_piece_message(self, expected_piece_index, expected_offset, timeout=5):
@@ -163,8 +160,10 @@ class Peer:
             if isinstance(msg, message.Piece) and msg.index == expected_piece_index and msg.begin == expected_offset:
                 return msg
             else:
-                print(f"Ignoring unexpected piece message: received piece {msg.index} at offset {msg.begin}, "
-                      f"expected piece {expected_piece_index} at offset {expected_offset}")
+                # Don't log every mismatch to reduce verbosity
+                # Only make a note if we got completely wrong piece
+                if msg.index != expected_piece_index:
+                    print(f"Ignoring piece {msg.index}, waiting for piece {expected_piece_index}")
 
     async def _send_handshake(self):
         """Send handshake with extension protocol support."""
@@ -211,7 +210,7 @@ class Peer:
     async def request_piece(self, index, begin, length):
         req = message.Request(index, begin, length)
         await self.send(req)
-        # print(f"Sent request for piece {index} at {begin} with length {length}")
+        # No logging for individual block requests to reduce verbosity
 
     async def send(self, msg):
         if hasattr(msg, 'serialize'):
@@ -223,7 +222,7 @@ class Peer:
 
     async def handle_piece(self, piece_msg: message.Piece):
         # Process a Piece message (update piece manager, write block, etc.)
-        # print(f"📥 Received block for piece {piece_msg.index} at offset {piece_msg.begin}")
+        # No logging for individual block receipts to reduce verbosity
         self.piece_manager.recieve_block_piece(piece_msg.index, piece_msg.begin, piece_msg.block)
 
     def handle_unchoke(self):
@@ -284,8 +283,6 @@ class Peer:
             client_name = handshake_dict.get(b'v', b'unknown')
             if isinstance(client_name, bytes):
                 client_name = client_name.decode('utf-8', errors='replace')
-            
-            print(f"Received extended handshake from {self.ip}:{self.port} ({client_name})")
             
             # Check if the peer supports PEX
             if b'm' in handshake_dict and b'ut_pex' in handshake_dict[b'm']:
@@ -375,25 +372,12 @@ class Peer:
                                 
                             added_peers.append((ip, port))
                         except Exception as e:
-                            print(f"Error unpacking peer: {e}")
-                        
-                # Also handle 'added.f' (encrypted connections) if present
-                if b'added.f' in pex_dict:
-                    print("PEX message contains encrypted peer flags (added.f)")
+                            # Silently ignore parsing errors to reduce verbosity
+                            pass
             
-            # Handle dropped peers if present
-            if b'dropped' in pex_dict:
-                dropped_bytes = pex_dict[b'dropped']
-                dropped_count = len(dropped_bytes) // 6
-                print(f"PEX message contains {dropped_count} dropped peers")
-            
-            print(f"Received PEX message from {self.ip}:{self.port} with {len(added_peers)} peers")
+            # Log only summary instead of details
             if added_peers:
-                for ip, port in added_peers[:5]:  # Print first 5 peers
-                    print(f"  - {ip}:{port}")
-                if len(added_peers) > 5:
-                    print(f"  - ... and {len(added_peers) - 5} more")
-                    
+                print(f"Received {len(added_peers)} new peers via PEX from {self.ip}:{self.port}")
             return added_peers
         except Exception as e:
             print(f"Error parsing PEX message: {e}")

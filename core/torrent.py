@@ -38,7 +38,7 @@ class Torrent:
 
             # Extract optional metadata
             self.creation_date = data.get(b'creation date', None)
-            self.comment = data[b'comment']
+            self.comment = data.get(b'comment', b'').decode('utf-8', errors='ignore')
 
             self.name = data[b'info'][b'name'].decode('utf-8')
 
@@ -74,8 +74,7 @@ class Torrent:
         print(f"Files: {self.files}")
         print(f"Announce: {self.announce}")
         print(f"Announce List: {self.announce_list}")
-        print(f"Creation Date: {datetime.fromtimestamp(self.creation_date)}")
+        if self.creation_date:
+            print(f"Creation Date: {datetime.fromtimestamp(self.creation_date)}")
         print(f"Piece Length: {self.piece_length}")
         print(f"Total Pieces: {len(self.pieces)//20}")
-
-
