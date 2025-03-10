@@ -131,7 +131,7 @@ class PieceManager:
                 
                 # Mark as completed and remove from busy set
                 self.completed_pieces.add(piece_index)
-                self.busy_pieces.discard(piece_index)
+                self.release_piece(piece_index)
                 self.stats["pieces_completed"] += 1
                 self.stats["pieces_validated"] += 1
                 

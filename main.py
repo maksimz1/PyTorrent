@@ -100,7 +100,7 @@ async def async_main(torrent_path: str):
             break
             
         # Periodically refresh tracker to get new peers if connection count is low
-        if len(peer_manager.connected_peers) < 5 and pex_round % 5 == 0:
+        if len(peer_manager.connected_peers) < 10 and pex_round % 5 == 0:
             print("Low connection count, refreshing tracker...")
             try:
                 await asyncio.to_thread(tracker.send_request)

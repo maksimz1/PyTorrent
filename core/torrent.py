@@ -31,7 +31,8 @@ class Torrent:
             data = bencodepy.decode(data)  # Decode the bencoded data
 
             # Extract the 'announce' field (tracker URL)
-            self.announce = data[b'announce'].decode('utf-8')
+            if b'announce' in data:
+                self.announce = data[b'announce'].decode('utf-8')
 
             # Extract info dictionary 
             self.info_dict = data[b'info']
@@ -54,7 +55,9 @@ class Torrent:
                     [url.decode('utf-8') for url in tier] 
                     for tier in data[b'announce-list']
                 ]
-            
+            if not self.announce and self.announce_list and self.announce_list[0]:
+                self.announce = self.announce_list[0][0]
+                
             # Handle single-file vs multi-file torrents
             if b'files' in data[b'info']:
                 # Multi-file torrent
