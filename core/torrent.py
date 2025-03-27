@@ -61,11 +61,14 @@ class Torrent:
             # Handle single-file vs multi-file torrents
             if b'files' in data[b'info']:
                 # Multi-file torrent
+                self.file_length = 0
+                self.files = []
                 for file_info in data[b'info'][b'files']:
                     length = file_info[b'length']
                     path = [p.decode('utf-8') for p in file_info[b'path']]
                     
                     self.files.append({'length': length, 'path': path})
+                    self.file_length += length # Add to the total file length
                     
             else:
                 # Single-file torrent

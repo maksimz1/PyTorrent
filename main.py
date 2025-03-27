@@ -178,21 +178,25 @@ async def async_main(torrent_path: str):
     print("Shutdown complete. Goodbye!")
 
 def assemble_file(piece_manager, torrent):
-    """Assemble the final file from the downloaded pieces."""
+    """Assemble the final file(s) from the downloaded pieces.
+    
+    Handles both single-file and multi-file torrents.
+    """
     # Determine output path
     output_path = torrent.name
     
-    print(f"Assembling file from {piece_manager.number_of_pieces} pieces...")
+    print(f"Assembling file(s) from {piece_manager.number_of_pieces} pieces...")
     
-    # Create output directory for multi-file torrents
+    # Check if it's a multi-file torrent
     if len(torrent.files) > 1:
-        os.makedirs(output_path, exist_ok=True)
-        
-        # TODO: Handle multi-file torrents
-        print("Multi-file torrents not fully implemented yet")
-        return output_path
+        return assemble_multifile_torrent(piece_manager, torrent, output_path)
+    else:
+        return assemble_singlefile_torrent(piece_manager, torrent, output_path)
+
+def assemble_singlefile_torrent(piece_manager, torrent, output_path):
+    """Assemble a single-file torrent."""
+    print(f"Processing single-file torrent: {output_path}")
     
-    # For single file torrents
     with open(output_path, 'wb') as output_file:
         for i in range(piece_manager.number_of_pieces):
             piece_path = f"file_pieces/{i}.part"
@@ -204,7 +208,79 @@ def assemble_file(piece_manager, torrent):
             with open(piece_path, 'rb') as piece_file:
                 output_file.write(piece_file.read())
     
+    print(f"Saved single file to: {output_path}")
     return output_path
+
+def assemble_multifile_torrent(piece_manager, torrent, base_directory):
+    """Assemble a multi-file torrent, distributing pieces across files."""
+    print(f"Processing multi-file torrent: {base_directory}")
+    
+    # Create the base directory
+    os.makedirs(base_directory, exist_ok=True)
+    
+    # Calculate the file boundaries in terms of bytes
+    file_boundaries = []
+    current_position = 0
+    
+    for file_info in torrent.files:
+        file_boundaries.append({
+            'path': file_info['path'],
+            'length': file_info['length'],
+            'offset': current_position
+        })
+        current_position += file_info['length']
+    
+    # Piece size is constant except for the last piece
+    piece_length = torrent.piece_length
+    
+    # Create a buffer to hold all piece data
+    all_data = bytearray()
+    
+    # Read all pieces in order
+    for i in range(piece_manager.number_of_pieces):
+        piece_path = f"file_pieces/{i}.part"
+        
+        if not os.path.exists(piece_path):
+            print(f"Warning: Piece {i} is missing, output will be incomplete")
+            # Fill with zeros if piece is missing to maintain offsets
+            if i < piece_manager.number_of_pieces - 1:
+                all_data.extend(bytes(piece_length))
+            else:
+                # For the last piece, need to calculate its actual length
+                last_piece_size = torrent.file_length - (piece_manager.number_of_pieces - 1) * piece_length
+                all_data.extend(bytes(last_piece_size))
+            continue
+            
+        with open(piece_path, 'rb') as piece_file:
+            piece_data = piece_file.read()
+            all_data.extend(piece_data)
+    
+    print(f"Read {len(all_data)} bytes from {piece_manager.number_of_pieces} pieces")
+    
+    # Write the data to each file
+    files_created = 0
+    
+    for file_info in file_boundaries:
+        # Construct the full path
+        full_path = os.path.join(base_directory, *file_info['path'])
+        
+        # Create parent directories if needed
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        
+        # Extract the data for this file
+        start = file_info['offset']
+        end = start + file_info['length']
+        file_data = all_data[start:end]
+        
+        # Write the file
+        with open(full_path, 'wb') as output_file:
+            output_file.write(file_data)
+            files_created += 1
+        
+        print(f"Created file: {full_path} ({file_info['length']} bytes)")
+    
+    print(f"Created {files_created} files in {base_directory}")
+    return base_directory
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:

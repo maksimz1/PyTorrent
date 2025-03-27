@@ -131,7 +131,7 @@ class PieceManager:
                 
                 # Mark as completed and remove from busy set
                 self.completed_pieces.add(piece_index)
-                self.release_piece(piece_index)
+                self.release_piece(piece_index, failed=False)
                 self.stats["pieces_completed"] += 1
                 self.stats["pieces_validated"] += 1
                 
@@ -278,14 +278,17 @@ class PieceManager:
         
         return None
     
-    def release_piece(self, piece_index: int):
+    def release_piece(self, piece_index: int, failed=True):
         """Release a busy piece so it can be downloaded by another peer."""
         if piece_index in self.busy_pieces:
             self.busy_pieces.discard(piece_index)
             if piece_index in self.piece_lock_time:
                 del self.piece_lock_time[piece_index]
-            self.stats["pieces_failed"] += 1
-            print(f"Released piece {piece_index} for re-download")
+            if failed:
+                self.stats["pieces_failed"] += 1
+                print(f"Released piece {piece_index} for re-download")
+            else:
+                print(f"Released piece {piece_index} (completed)")
 
     def get_progress(self) -> float:
         """Calculate current download progress as a percentage."""
