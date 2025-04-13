@@ -23,6 +23,9 @@ class AsyncPeerManager:
         self.known_peers = {}  # (ip, port) -> timestamp
         self.pex_peers = {}    # (ip, port) -> timestamp
         self.connected_peers = {}  # (ip, port) -> peer
+
+        # Tasks for managing peer connections
+        self.tasks = set()
         
         # Stats for tracking peer sources
         self.stats = {
@@ -108,7 +111,7 @@ class AsyncPeerManager:
         connected_peer = await self._connect_peer(peer)
         if connected_peer:
             # Spawn a dedicated task to handle this peer immediately.
-            asyncio.create_task(self.handle_peer(connected_peer))
+            self.tasks.add(asyncio.create_task(self.handle_peer(connected_peer)))
 
     async def add_peers(self):
         """Connect to all peers from the tracker at once."""
@@ -119,9 +122,13 @@ class AsyncPeerManager:
     
     async def connect_to_pex_peers(self, peers_list):
         """Connect to newly discovered PEX peers."""
+        
+        # Dont try to connect to new peers, unless we have less then 40 peers connected
+        if len(self.connected_peers) >= 40:
+            return
         # Don't try to connect to peers we're already connected to
         unconnected_peers = [(ip, port) for ip, port in peers_list 
-                             if (ip, port) not in self.connected_peers]
+                            if (ip, port) not in self.connected_peers]
         
         if not unconnected_peers:
             return
@@ -143,6 +150,10 @@ class AsyncPeerManager:
         now = time.time()
         peers_shared = 0
         
+        # To reduce overhead, we limit the PEX when we have enough peers
+        if len(self.connected_peers) >= 40:
+            return
+        
         # Create a list of all known peer addresses
         all_peers = list(self.known_peers.keys())
         
@@ -158,6 +169,27 @@ class AsyncPeerManager:
         
         if peers_shared > 0:
             print(f"Shared peer lists with {peers_shared} PEX-enabled peers")
+
+    async def remove_peer(self, peer):
+        """
+        Remove a peer from tracking and update stats.
+        Calls peer's disconnect method to clean up connection.
+        """
+        # Disconnect the peer (using the peer's own method)
+        await peer.disconnect()
+        
+        # Remove from tracking and update stats
+        peer_key = (peer.ip, peer.port)
+        if peer_key in self.connected_peers:
+            # Update source-based stats
+            source = getattr(peer, 'source', 'unknown')
+            if source == "pex":
+                self.stats["connected_from_pex"] -= 1
+            elif source == "tracker":
+                self.stats["connected_from_tracker"] -= 1
+            
+            # Remove from connected peers
+            del self.connected_peers[peer_key]
 
     async def handle_peer(self, peer: Peer):
         """
@@ -193,6 +225,8 @@ class AsyncPeerManager:
             # If the peer still hasn't unchoked us, print a warning but continue
             if peer.is_choking():
                 print(f"Warning: Peer {peer.ip}:{peer.port} did not unchoke us within {unchoke_wait_time} seconds")
+                await self.remove_peer(peer)
+                return
                 
             # Print bitfield info if available
             if peer.bitfield is not None:
@@ -276,21 +310,9 @@ class AsyncPeerManager:
         block_size = BLOCK_SIZE
         cur_piece_length = 0
         MAX_RETRIES = 3
-
-        # Create directory for piece files if it doesn't exist
-        os.makedirs("file_pieces", exist_ok=True)
         
         piece_path = f"file_pieces/{piece_index}.part"
-        if os.path.exists(piece_path):
-            os.remove(piece_path)
-        
-        # Pre-allocate the file with correct size
-        with open(piece_path, "wb") as f:
-            f.write(b"\x00" * piece_length)
 
-        # Calculate correct number of blocks
-        num_blocks = (piece_length + block_size - 1) // block_size
-        
         # Download the piece block by block - with minimal output
         for offset in range(0, piece_length, block_size):
             length = min(block_size, piece_length - offset)
@@ -351,24 +373,12 @@ class AsyncPeerManager:
                 pass
             return False
 
-        # Validate hash
-        print(f"Validating piece {piece_index}...")
-        piece_hash = peer.piece_manager.pieces[piece_index].piece_hash
+
+        if piece_index in peer.piece_manager.completed_pieces:
+            return True
         
-        with open(piece_path, "rb") as f:
-            piece_data = f.read()
-            actual_hash = hashlib.sha1(piece_data).digest()
-            
-            if actual_hash != piece_hash:
-                print(f"Hash validation failed for piece {piece_index}")
-                try:
-                    os.remove(piece_path)
-                except OSError:
-                    pass
-                return False
-        
-        return True
-        
+        return False
+    
     def debug_bitfield(self, bitfield, peer_ip, peer_port):
         """Print detailed information about a peer's bitfield."""
         if bitfield is None:

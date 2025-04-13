@@ -5,15 +5,13 @@ import bencodepy
 import time
 from protocol.message import Message
 import protocol.message as message
-import hashlib
-import traceback
 
 # Extension message IDs (BEP 10)
 EXT_HANDSHAKE_ID = 0
 UT_PEX_ID = 1  # Default ID for PEX
 
 # PEX settings
-PEX_INTERVAL = 45  # Send PEX messages every 45 seconds
+PEX_INTERVAL = 120  # Send PEX messages every 2 minutes
 
 class Peer:
     def __init__(self, ip: str, port: int, info_hash, peer_id, piece_manager) -> None:
@@ -37,6 +35,9 @@ class Peer:
         self.incoming_queue = asyncio.Queue()
         # Listener task for continuously reading messages
         self.listener_task = None
+        
+        # PEX task for using PEX(using this to avoid garbage collector stopping the task)
+        self.pex_task = None
         
         # PEX support
         self.supports_pex = False
@@ -68,6 +69,15 @@ class Peer:
         except Exception as e:
             self.healthy = False
             print(f"Connection failed to {self.ip}:{self.port}: {e}")
+
+    async def disconnect(self):
+        """Close the connection and stop the listener task."""
+        if self.writer and not self.writer.is_closing():
+            self.writer.close()
+            await self.writer.wait_closed()
+        if self.listener_task:
+            self.listener_task.cancel()
+        print(f"Disconnected from {self.ip}:{self.port}")
 
     async def reconnect(self, delay=5, max_attempts=5):
         """Try to reconnect to the peer after a delay, with a limited number of attempts."""
@@ -117,7 +127,7 @@ class Peer:
                                 self.pex_manager.add_peer(ip, port, source="pex")
                             
                             # Trigger immediate connection to the new peers
-                            asyncio.create_task(self.pex_manager.connect_to_pex_peers(new_peers))
+                            self.pex_task = asyncio.create_task(self.pex_manager.connect_to_pex_peers(new_peers))
                     else:
                         # Just log the message type but don't print details
                         pass
@@ -129,10 +139,17 @@ class Peer:
                 # Dispatch messages based on their type
                 if isinstance(msg, message.Unchoke):
                     self.handle_unchoke()
+                if isinstance(msg, message.Choke):
+                    self.handle_choke()
                 elif isinstance(msg, message.Bitfield):
                     self.handle_bitfield(msg)
                 elif isinstance(msg, message.Have):
                     self.handle_have(msg)
+                elif isinstance(msg, message.Request):
+                    # TODO: Handle Request messages properly
+                    print(f"🔴 Received Request message from {self.ip}:{self.port} - piece: {msg.index}, offset: {msg.begin}, length: {msg.length}")
+                elif isinstance(msg, message.Interested):
+                    print(f"🔵 Recieved Interested message from {self.ip}:{self.port}")
                 elif isinstance(msg, message.Piece):
                     # Enqueue Piece messages for download responses
                     await self.incoming_queue.put(msg)
