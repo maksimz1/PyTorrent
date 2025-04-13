@@ -64,10 +64,8 @@ class AsyncPeerManager:
         """Connect to peer and initialize PEX extension."""
         await peer.connect()
         if peer.healthy:
-            # Initialize PEX extension for the peer
-            if not hasattr(peer, 'pex'):
-                peer.pex = PEXExtension(peer)
-                peer.pex_manager = self
+            
+
             
             # Store the connected peer
             self.connected_peers[(peer.ip, peer.port)] = peer
@@ -102,7 +100,8 @@ class AsyncPeerManager:
             peer_info[1],
             self.tracker.info_hash,
             self.tracker.peer_id,
-            self.piece_manager
+            self.piece_manager,
+            self
         )
         
         # Set source for tracking
@@ -123,9 +122,9 @@ class AsyncPeerManager:
     async def connect_to_pex_peers(self, peers_list):
         """Connect to newly discovered PEX peers."""
         
-        # Dont try to connect to new peers, unless we have less then 40 peers connected
-        if len(self.connected_peers) >= 40:
-            return
+        # # Dont try to connect to new peers, unless we have less then 40 peers connected
+        # if len(self.connected_peers) >= 40:
+        #     return
         # Don't try to connect to peers we're already connected to
         unconnected_peers = [(ip, port) for ip, port in peers_list 
                             if (ip, port) not in self.connected_peers]
@@ -164,8 +163,9 @@ class AsyncPeerManager:
                     peer_list = [(ip, port) for (ip, port) in all_peers 
                                 if (ip, port) != (peer_ip, peer_port)]
                     
-                    await peer.pex.send_pex_message(peer_list)
-                    peers_shared += 1
+                    if peer.writer and not peer.writer.is_closing():
+                        await peer.pex.send_pex_message(peer_list, self.my_ip)
+                        peers_shared += 1
         
         if peers_shared > 0:
             print(f"Shared peer lists with {peers_shared} PEX-enabled peers")
