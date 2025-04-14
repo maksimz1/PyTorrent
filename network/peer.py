@@ -34,6 +34,9 @@ class Peer:
 
         # Queue to store incoming Piece messages
         self.incoming_queue = asyncio.Queue()
+
+        # Queue to store incoming messages
+        self.message_queue = asyncio.Queue()
         # Listener task for continuously reading messages
         self.listener_task = None
         
@@ -131,26 +134,34 @@ class Peer:
                 # Handle standard BitTorrent messages
                 msg = Message.deserialize(data)
                 
-                # Dispatch messages based on their type
-                if isinstance(msg, message.Unchoke):
-                    self.handle_unchoke()
-                if isinstance(msg, message.Choke):
-                    self.handle_choke()
-                elif isinstance(msg, message.Bitfield):
-                    self.handle_bitfield(msg)
-                elif isinstance(msg, message.Have):
-                    self.handle_have(msg)
-                elif isinstance(msg, message.Request):
-                    # TODO: Handle Request messages properly
-                    print(f"🔴 Received Request message from {self.ip}:{self.port} - piece: {msg.index}, offset: {msg.begin}, length: {msg.length}")
-                elif isinstance(msg, message.Interested):
-                    print(f"🔵 Recieved Interested message from {self.ip}:{self.port}")
-                elif isinstance(msg, message.Piece):
+                if isinstance(msg, message.Piece):
                     # Enqueue Piece messages for download responses
                     await self.incoming_queue.put(msg)
+                else:
+                    await self.message_queue.put(msg)
+
+                # # Dispatch messages based on their type
+                # if isinstance(msg, message.Unchoke):
+                #     self.handle_unchoke()
+                # if isinstance(msg, message.Choke):
+                #     self.handle_choke()
+                # elif isinstance(msg, message.Bitfield):
+                #     self.handle_bitfield(msg)
+                # elif isinstance(msg, message.Have):
+                #     self.handle_have(msg)
+                # elif isinstance(msg, message.Request):
+                #     # TODO: Handle Request messages properly
+                #     print(f"🔴 Received Request message from {self.ip}:{self.port} - piece: {msg.index}, offset: {msg.begin}, length: {msg.length}")
+                # elif isinstance(msg, message.Interested):
+                #     print(f"🔵 Recieved Interested message from {self.ip}:{self.port}")
+                
             except asyncio.TimeoutError:
                 # Timeouts are normal for idle connections
                 pass
+            # Error for not passing the correct arguments to the message deserialize
+            except ValueError as e:
+                # Print the error exactly
+                print(f"Didnt properly deserialize message from {self.ip}:{self.port}: {e}")
             except asyncio.IncompleteReadError as e:
                 print(f"Connection closed with {self.ip}:{self.port}: {e}")
                 break
@@ -233,9 +244,12 @@ class Peer:
             raise ValueError("Invalid message object")
 
     async def handle_piece(self, piece_msg: message.Piece):
-        # Process a Piece message (update piece manager, write block, etc.)
-        # No logging for individual block receipts to reduce verbosity
-        self.piece_manager.recieve_block_piece(piece_msg.index, piece_msg.begin, piece_msg.block)
+        # Process the piece message, if it is done correctly, send out a have message
+        if self.piece_manager.recieve_block_piece(piece_msg.index, piece_msg.begin, piece_msg.block):
+            # Send a have message to the peer
+            have_msg = message.Have(piece_msg.index)
+            await self.send(have_msg)
+            print(f"Sent HAVE message for piece {piece_msg.index} to {self.ip}:{self.port}")
 
     def handle_unchoke(self):
         self.state['peer_choking'] = False

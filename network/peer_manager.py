@@ -9,6 +9,7 @@ from core.tracker import TrackerHandler
 from core.piece_manager import PieceManager
 from protocol.message import Interested
 from protocol.extensions.pex import PEXExtension
+import protocol.message as message
 
 # Download settings
 BLOCK_SIZE = 16 * 1024  # 16 KB blocks
@@ -23,6 +24,7 @@ class AsyncPeerManager:
         self.known_peers = {}  # (ip, port) -> timestamp
         self.pex_peers = {}    # (ip, port) -> timestamp
         self.connected_peers = {}  # (ip, port) -> peer
+        self.peer_processors = {}  # (ip, port) -> asyncio.Task
 
         # Tasks for managing peer connections
         self.tasks = set()
@@ -64,12 +66,13 @@ class AsyncPeerManager:
         """Connect to peer and initialize PEX extension."""
         await peer.connect()
         if peer.healthy:
-            
-
-            
             # Store the connected peer
             self.connected_peers[(peer.ip, peer.port)] = peer
-            
+
+            # Start message processor for this peer
+            peer_key = (peer.ip, peer.port)
+            self.peer_processors[peer_key] = asyncio.create_task(self.process_peer_messages(peer))
+
             # Update connection stats
             if hasattr(peer, 'source'):
                 if peer.source == "pex":
@@ -164,7 +167,7 @@ class AsyncPeerManager:
                                 if (ip, port) != (peer_ip, peer_port)]
                     
                     if peer.writer and not peer.writer.is_closing():
-                        await peer.pex.send_pex_message(peer_list, self.my_ip)
+                        peer.pex.send_pex_message(peer_list, self.my_ip)
                         peers_shared += 1
         
         if peers_shared > 0:
@@ -175,6 +178,13 @@ class AsyncPeerManager:
         Remove a peer from tracking and update stats.
         Calls peer's disconnect method to clean up connection.
         """
+
+        peer_key = (peer.ip, peer.port)
+        if peer_key in self.peer_processors:
+            # Cancel the message processing task
+            self.peer_processors[peer_key].cancel()
+            del self.peer_processors[peer_key]
+
         # Disconnect the peer (using the peer's own method)
         await peer.disconnect()
         
@@ -191,6 +201,43 @@ class AsyncPeerManager:
             # Remove from connected peers
             del self.connected_peers[peer_key]
 
+
+    async def process_peer_messages(self, peer: Peer):
+        """Process incoming messages from a peer."""
+        peer_key = (peer.ip, peer.port)
+
+        try:
+            while True:
+                # Wait for a message from the peer
+                msg = await peer.message_queue.get()
+                try: 
+                    if isinstance(msg, message.Unchoke):
+                        peer.handle_unchoke()
+                    if isinstance(msg, message.Choke):
+                        peer.handle_choke()
+                    elif isinstance(msg, message.Bitfield):
+                        peer.handle_bitfield(msg)
+                    elif isinstance(msg, message.Have):
+                        peer.handle_have(msg)
+                    elif isinstance(msg, message.Request):
+                        # TODO: Handle Request messages properly
+                        print(f"🔴 Received Request message from {peer.ip}:{peer.port} - piece: {msg.index}, offset: {msg.begin}, length: {msg.length}")
+                    elif isinstance(msg, message.Interested):
+                        print(f"🔵 Recieved Interested message from {peer.ip}:{peer.port}")
+
+                except Exception as e:
+                    print(f"Error processing message from {peer.ip}:{peer.port}: {e}")
+
+                peer.message_queue.task_done()
+
+        except asyncio.CancelledError:
+            print(f"Peer {peer.ip}:{peer.port} message processing cancelled")
+
+        finally:
+            # Clean up if needed
+            if peer_key in self.peer_processors:
+                del self.peer_processors[peer_key]
+        
     async def handle_peer(self, peer: Peer):
         """
         Handle initialization and piece downloading for a single peer.

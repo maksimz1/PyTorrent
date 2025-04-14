@@ -2,6 +2,7 @@ import os
 import hashlib
 import random
 import time
+import bitstring
 from typing import List, Dict, Set, Optional, Tuple, Any
 from core.torrent import Torrent
 from core.piece import Piece
@@ -16,6 +17,7 @@ class PieceManager:
         self.failed_attempts: Dict[int, int] = {}  # Track failed attempts per piece
         self.piece_lock_time: Dict[int, float] = {}  # When piece was marked busy
         self.number_of_pieces = torrent.total_pieces
+        self.bitfield = bitstring.BitArray(self.number_of_pieces)  # Bitfield to track piece availability
         
         # Stats for debugging
         self.stats = {
@@ -150,6 +152,8 @@ class PieceManager:
                     else:
                         eta = f"{eta_seconds/3600:.1f} hours"
                     print(f"   Current rate: {self.stats['download_rate_pieces']:.2f} pieces/sec, ETA: {eta}")
+
+                return True
             else:
                 print(f"❌ Hash mismatch for piece {piece_index}. Retrying...")
                 piece.flush()  # Reset piece for redownload
@@ -158,6 +162,7 @@ class PieceManager:
                 
                 # Track failed attempts
                 self.failed_attempts[piece_index] = self.failed_attempts.get(piece_index, 0) + 1
+        return False
 
     def _validate_piece(self, piece: Piece) -> bool:
         """Validate piece data against expected hash."""
