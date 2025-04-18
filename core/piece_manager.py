@@ -284,6 +284,20 @@ class PieceManager:
         
         return None
     
+    def get_piece(self, piece_index: int, offset: int, length: int) -> Optional[bytes]:
+        """Get a downloaded piece from disk"""
+
+        if piece_index not in self.completed_pieces:
+            return None
+        
+        if os.path.exists(f"file_pieces/{piece_index}.part"):
+            with open(f"file_pieces/{piece_index}.part", 'rb') as f:
+                f.seek(offset)
+                data = f.read(length)
+            return data
+
+        return None
+
     def release_piece(self, piece_index: int, failed=True):
         """Release a busy piece so it can be downloaded by another peer."""
         if piece_index in self.busy_pieces:

@@ -199,12 +199,23 @@ class Piece(Message):
         self.block = block
     
     @classmethod
+    def serialize(self):
+        payload = (
+            self.index.to_bytes(4, byteorder='big') +
+            self.begin.to_bytes(4, byteorder='big') +
+            self.block
+        )
+        message_length = (1 + len(payload)).to_bytes(4, byteorder='big')
+        
+        return message_length + bytes([self.message_id]) + payload
+
+    @classmethod
     def deserialize_payload(cls, data):
+
         index = int.from_bytes(data[:4], 'big')
         begin = int.from_bytes(data[4:8], 'big')
         block = data[8:]
         return Piece(index, begin, block)
-
 
 class Cancel(Message):
     message_id = 8
