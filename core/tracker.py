@@ -73,8 +73,6 @@ class TrackerHandler:
                 if success:
                     return True
         return False
-        
-
     
     def _send_http_request(self, tracker_url:str, event:str = None):
         """

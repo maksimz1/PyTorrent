@@ -139,21 +139,6 @@ class Peer:
                     await self.incoming_queue.put(msg)
                 else:
                     await self.message_queue.put(msg)
-
-                # # Dispatch messages based on their type
-                # if isinstance(msg, message.Unchoke):
-                #     self.handle_unchoke()
-                # if isinstance(msg, message.Choke):
-                #     self.handle_choke()
-                # elif isinstance(msg, message.Bitfield):
-                #     self.handle_bitfield(msg)
-                # elif isinstance(msg, message.Have):
-                #     self.handle_have(msg)
-                # elif isinstance(msg, message.Request):
-                #     # TODO: Handle Request messages properly
-                #     print(f"🔴 Received Request message from {self.ip}:{self.port} - piece: {msg.index}, offset: {msg.begin}, length: {msg.length}")
-                # elif isinstance(msg, message.Interested):
-                #     print(f"🔵 Recieved Interested message from {self.ip}:{self.port}")
                 
             except asyncio.TimeoutError:
                 # Timeouts are normal for idle connections
@@ -167,8 +152,6 @@ class Peer:
                 break
             except Exception as e:
                 print(f"Error in listening from {self.ip}:{self.port}: {e}")
-                # Print stack trace for unexpected errors in debug mode only
-                # traceback.print_exc()
                 break
 
     async def get_piece_message(self, expected_piece_index, expected_offset, timeout=5):

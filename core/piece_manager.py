@@ -107,6 +107,7 @@ class PieceManager:
         for piece in self.pieces:
             if self.is_piece_downloaded(piece):
                 self.completed_pieces.add(piece.piece_index)
+                self.bitfield.set(piece.piece_index, 1)
                 self.stats["pieces_completed"] += 1
 
     def recieve_block_piece(self, piece_index: int, piece_offset: int, piece_data: bytes):
@@ -133,6 +134,7 @@ class PieceManager:
                 
                 # Mark as completed and remove from busy set
                 self.completed_pieces.add(piece_index)
+                self.bitfield.set(piece_index, 1)
                 self.release_piece(piece_index, failed=False)
                 self.stats["pieces_completed"] += 1
                 self.stats["pieces_validated"] += 1
@@ -174,7 +176,6 @@ class PieceManager:
         piece_path = f"file_pieces/{piece.piece_index}.part"
         if not os.path.exists(piece_path):
             return False
-        
         try:
             with open(piece_path, 'rb') as f:
                 data = f.read()

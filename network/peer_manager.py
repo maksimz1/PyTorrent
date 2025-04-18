@@ -173,7 +173,7 @@ class AsyncPeerManager:
         if peers_shared > 0:
             print(f"Shared peer lists with {peers_shared} PEX-enabled peers")
 
-    async def remove_peer(self, peer):
+    async def remove_peer(self, peer: Peer):
         """
         Remove a peer from tracking and update stats.
         Calls peer's disconnect method to clean up connection.
