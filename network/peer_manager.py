@@ -9,17 +9,26 @@ from core.tracker import TrackerHandler
 from core.piece_manager import PieceManager
 from protocol.message import Interested
 from protocol.extensions.pex import PEXExtension
+from enum import Enum
 import protocol.message as message
 
 # Download settings
 BLOCK_SIZE = 16 * 1024  # 16 KB blocks
 
+class SessionState:
+    STOPPED = 0
+    DOWNLOADING = 1
+    PAUSED = 2
+    COMPLETED = 3
+    ERROR = 4
+
 class AsyncPeerManager:
-    def __init__(self, tracker: TrackerHandler, piece_manager: PieceManager, my_ip):
+    def __init__(self, session, tracker: TrackerHandler, piece_manager: PieceManager, my_ip,):
         self.tracker = tracker
         self.piece_manager = piece_manager
         self.my_ip = my_ip
-        
+        self.session = session
+
         # Add PEX-specific attributes
         self.known_peers = {}  # (ip, port) -> timestamp
         self.pex_peers = {}    # (ip, port) -> timestamp
@@ -284,6 +293,18 @@ class AsyncPeerManager:
             max_failures = 5  # Increased max failures
             
             while True:
+                # Check session state - pause downloading if needed
+                if self.session.state == SessionState.PAUSED:
+                    await asyncio.sleep(0.5)
+                    continue
+                elif self.session.state == SessionState.COMPLETED:
+                    print("Session completed, stopping peer download.")
+                    break
+                elif self.session.state == SessionState.STOPPED:
+                    print("Session stopped, breaking out of peer download loop.")
+                    break
+
+
                 # If the peer is choking us, we can't download
                 if peer.is_choking():
                     print(f"Peer {peer.ip}:{peer.port} is choking us, waiting...")
@@ -295,6 +316,7 @@ class AsyncPeerManager:
                 next_piece = self.piece_manager.choose_next_piece(peer.bitfield)
                 if next_piece is None:
                     print(f"No available piece for peer {peer.ip}:{peer.port}")
+                    print(f"State of session: {self.session.state}")
                     await asyncio.sleep(5)  # Wait before checking again
                     continue
                     
@@ -337,6 +359,10 @@ class AsyncPeerManager:
         Download a single piece from a peer with robust error handling and validation.
         Less verbose output - focusing only on overall piece progress.
         """
+        # Check session state before starting - don't download if paused
+        if self.session and self.session.state == SessionState.PAUSED:
+            return False
+        
         # Validate piece length
         if piece_length <= 0:
             print(f"Error: Cannot download piece {piece_index} with invalid length {piece_length}")
@@ -358,10 +384,12 @@ class AsyncPeerManager:
         cur_piece_length = 0
         MAX_RETRIES = 3
         
-        piece_path = f"file_pieces/{piece_index}.part"
-
         # Download the piece block by block - with minimal output
         for offset in range(0, piece_length, block_size):
+            # Check session state again before each block - allow pausing mid-piece
+            if self.session and self.session.state == SessionState.PAUSED:
+                return False
+                
             length = min(block_size, piece_length - offset)
             retries = 0
             
@@ -402,10 +430,6 @@ class AsyncPeerManager:
                     
             if retries == MAX_RETRIES:
                 print(f"\nFailed to download block at offset {offset} after {MAX_RETRIES} retries")
-                try:
-                    os.remove(piece_path)
-                except OSError:
-                    pass
                 return False
 
         # Print newline after piece completion for cleaner output
@@ -413,19 +437,14 @@ class AsyncPeerManager:
 
         # Verify we got all the data
         if cur_piece_length < piece_length:
-            print(f"Piece {piece_index} incomplete (downloaded {cur_piece_length} of {piece_length}). Removing file.")
-            try:
-                os.remove(piece_path)
-            except OSError:
-                pass
+            print(f"Piece {piece_index} incomplete (downloaded {cur_piece_length} of {piece_length}).")
             return False
-
 
         if piece_index in peer.piece_manager.completed_pieces:
             return True
         
         return False
-    
+        
     def debug_bitfield(self, bitfield, peer_ip, peer_port):
         """Print detailed information about a peer's bitfield."""
         if bitfield is None:

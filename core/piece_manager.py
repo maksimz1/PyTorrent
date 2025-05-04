@@ -8,9 +8,10 @@ from core.torrent import Torrent
 from core.piece import Piece
 
 class PieceManager:
-    def __init__(self, torrent: Torrent):
+    def __init__(self, torrent: Torrent, download_dir: str = "downloads"):
         """Initialize the PieceManager with a torrent file."""
         self.torrent = torrent
+        self.download_dir = download_dir
         self.pieces: List[Piece] = []
         self.busy_pieces: Set[int] = set()  # Pieces currently being downloaded
         self.completed_pieces: Set[int] = set()  # Successfully downloaded pieces
@@ -18,7 +19,12 @@ class PieceManager:
         self.piece_lock_time: Dict[int, float] = {}  # When piece was marked busy
         self.number_of_pieces = torrent.total_pieces
         self.bitfield = bitstring.BitArray(self.number_of_pieces)  # Bitfield to track piece availability
-        
+
+        # Pre-allocate the output file(s)
+        self.output_files = {} # Maps file paths to their info
+
+        self._pre_allocate_files()
+
         # Stats for debugging
         self.stats = {
             "pieces_selected": 0,
@@ -36,9 +42,7 @@ class PieceManager:
             for i in range(torrent.total_pieces)
         ]
         
-        # Create the directory for piece files if it doesn't exist
-        if not os.path.exists("file_pieces"):
-            os.makedirs("file_pieces", exist_ok=True)
+        
         
         # Initialize piece objects
         self._generate_pieces()
@@ -48,6 +52,53 @@ class PieceManager:
         
         print(f"PieceManager initialized with {self.number_of_pieces} pieces.")
         print(f"Loaded {len(self.completed_pieces)} already completed pieces.")
+
+    def _pre_allocate_files(self):
+        """Create empty files of the correct size."""
+        if len(self.torrent.files) > 1:
+            # Handle multi-file torrent
+            base_dir = os.path.join(self.download_dir, self.torrent.name)
+            os.makedirs(base_dir, exist_ok=True)
+            
+            # Create each file
+            offset = 0
+            for file_info in self.torrent.files:
+                # Get file path
+                path_parts = file_info['path']
+                file_path = os.path.join(base_dir, *path_parts)
+                
+                # Create parent directories
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                
+                # Pre-allocate the file
+                with open(file_path, 'wb') as f:
+                    f.seek(file_info['length'] - 1)
+                    f.write(b'\0')
+                
+                # Store file info with byte offset
+                self.output_files[file_path] = {
+                    'length': file_info['length'],
+                    'offset': offset
+                }
+                
+                offset += file_info['length']
+                
+        else:
+            # Handle single-file torrent
+            file_path = os.path.join(self.download_dir, self.torrent.name)
+            
+            # Pre-allocate the file
+            with open(file_path, 'wb') as f:
+                f.seek(self.torrent.file_length - 1)
+                f.write(b'\0')
+            
+            # Store file info
+            self.output_files[file_path] = {
+                'length': self.torrent.file_length,
+                'offset': 0
+            }
+            
+        print(f"Pre-allocated {len(self.output_files)} file(s) for download")
 
     def _generate_pieces(self):
         """Create Piece objects for all pieces in the torrent with proper length validation."""
@@ -111,60 +162,101 @@ class PieceManager:
                 self.stats["pieces_completed"] += 1
 
     def recieve_block_piece(self, piece_index: int, piece_offset: int, piece_data: bytes):
-        """Process a received block of a piece."""
-        if piece_index >= len(self.pieces):
+        """Process a received block and write it directly to the output file."""
+        if piece_index >= self.number_of_pieces:
             print(f"Error: Received invalid piece index {piece_index}")
-            return
+            return False
             
+        # Add to in-memory piece for validation
         piece = self.pieces[piece_index]
         piece.add_block(piece_offset, piece_data)
-
+        
+        # If the piece is complete, validate its hash
         if piece.is_complete():
-            # Use simpler output - just indicate completion and validation
             if self._validate_piece(piece):
-                # Track speed
-                now = time.time()
-                time_since_last = now - self.stats["last_completed_time"]
-                self.stats["last_completed_time"] = now
-                self.stats["download_rate_pieces"] = 1.0 / time_since_last if time_since_last > 0 else 0
-                
-                # Save the piece to disk
-                with open(f"file_pieces/{piece_index}.part", 'wb') as f:
-                    f.write(piece.raw_data)
-                
-                # Mark as completed and remove from busy set
+                # Mark as complete in bitmap
                 self.completed_pieces.add(piece_index)
-                self.bitfield.set(piece_index, 1)
+                self.bitfield[piece_index] = 1
+                
+                # Write the entire piece to file(s)
+                self._write_piece_to_files(piece_index, piece.raw_data)
+                
+                # Release the piece from memory after writing to file
                 self.release_piece(piece_index, failed=False)
                 self.stats["pieces_completed"] += 1
-                self.stats["pieces_validated"] += 1
+                
+                # Save progress
+                self._save_progress()
                 
                 # Calculate and display progress
                 progress = self.get_progress()
                 print(f"✅ Piece {piece_index} validated and saved. Progress: {progress:.2f}%")
                 
-                # Calculate ETA if we have download rate
-                if self.stats["download_rate_pieces"] > 0:
-                    remaining_pieces = self.number_of_pieces - len(self.completed_pieces)
-                    eta_seconds = remaining_pieces / self.stats["download_rate_pieces"]
-                    if eta_seconds < 60:
-                        eta = f"{eta_seconds:.0f} seconds"
-                    elif eta_seconds < 3600:
-                        eta = f"{eta_seconds/60:.1f} minutes"
-                    else:
-                        eta = f"{eta_seconds/3600:.1f} hours"
-                    print(f"   Current rate: {self.stats['download_rate_pieces']:.2f} pieces/sec, ETA: {eta}")
-
                 return True
             else:
+                # Hash mismatch, mark for re-download
                 print(f"❌ Hash mismatch for piece {piece_index}. Retrying...")
-                piece.flush()  # Reset piece for redownload
-                self.busy_pieces.discard(piece_index)  # Release the piece
+                piece.flush()
+                self.busy_pieces.discard(piece_index)
                 self.stats["pieces_invalid"] += 1
                 
-                # Track failed attempts
-                self.failed_attempts[piece_index] = self.failed_attempts.get(piece_index, 0) + 1
         return False
+
+    def _write_piece_to_files(self, piece_index, piece_data):
+        """Write a complete piece to its correct position in the output file(s)."""
+        # Calculate the absolute byte offset in the torrent
+        piece_offset = piece_index * self.torrent.piece_length
+        piece_length = len(piece_data)
+        
+        # Determine which file(s) this piece belongs to
+        remaining_bytes = piece_length
+        current_offset = 0
+        
+        # Sort files by offset for consistent ordering
+        sorted_files = sorted(self.output_files.items(), key=lambda x: x[1]['offset'])
+        
+        for file_path, file_info in sorted_files:
+            file_start = file_info['offset']
+            file_end = file_start + file_info['length']
+            
+            # Check if this piece overlaps with the current file
+            if piece_offset + current_offset < file_end and piece_offset + current_offset + remaining_bytes > file_start:
+                # Calculate overlap
+                overlap_start = max(0, file_start - (piece_offset + current_offset))
+                overlap_end = min(remaining_bytes, file_end - (piece_offset + current_offset))
+                overlap_length = overlap_end - overlap_start
+                
+                # Calculate file write position
+                write_pos = max(0, (piece_offset + current_offset + overlap_start) - file_start)
+                
+                # Get the portion of data to write
+                data_slice = piece_data[overlap_start:overlap_end]
+                
+                # Write to file
+                try:
+                    with open(file_path, 'r+b') as f:
+                        f.seek(write_pos)
+                        f.write(data_slice)
+                except Exception as e:
+                    print(f"Error writing to {file_path}: {e}")
+                
+                # Update tracking variables
+                current_offset += overlap_length
+                remaining_bytes -= overlap_length
+                
+                # Exit if we've written all data
+                if remaining_bytes <= 0:
+                    break
+
+    def _save_progress(self):
+        """Save current download progress to a file."""
+        progress_path = os.path.join(self.download_dir, f"{self.torrent.name}.progress")
+        
+        try:
+            with open(progress_path, 'wb') as f:
+                f.write(self.bitfield.tobytes())
+        except Exception as e:
+            print(f"Error saving progress: {e}")
 
     def _validate_piece(self, piece: Piece) -> bool:
         """Validate piece data against expected hash."""
@@ -173,27 +265,7 @@ class PieceManager:
 
     def is_piece_downloaded(self, piece: Piece) -> bool:
         """Check if a piece has already been successfully downloaded to disk."""
-        piece_path = f"file_pieces/{piece.piece_index}.part"
-        if not os.path.exists(piece_path):
-            return False
-        try:
-            with open(piece_path, 'rb') as f:
-                data = f.read()
-
-            # Check file size matches expected length
-            if len(data) != piece.piece_length:
-                return False
-
-            # Validate hash
-            if hashlib.sha1(data).digest() != piece.piece_hash:
-                # Invalid hash, file might be corrupt
-                os.remove(piece_path)
-                return False
-
-            return True
-        except Exception as e:
-            print(f"Error checking piece {piece.piece_index}: {e}")
-            return False
+        return piece.piece_index in self.completed_pieces
 
     def choose_next_piece(self, peer_bitfield=None):
         """

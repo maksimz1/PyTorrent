@@ -1,305 +1,212 @@
-import asyncio
-import os
+# gui_main.py
 import sys
-import traceback
-import time
-from requests import get
+import asyncio
+import qasync
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidgetItem,
+                            QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QFileDialog,
+                            QProgressBar, QLabel, QHeaderView, QMessageBox, QMenu)
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
+from session_manager import SessionManager
+from torrent_session import SessionState
 
-# Import from our reorganized modules
-from core.torrent import Torrent
-from core.tracker import TrackerHandler
-from core.piece_manager import PieceManager
-from network.peer_manager import AsyncPeerManager
-from protocol.message import Message, Extended
-
-# Retrieve your public IP (synchronously for now)
-try:
-    MY_IP = get('https://api.ipify.org').content.decode('utf8')
-    print(f"My IP: {MY_IP}")
-except Exception as e:
-    print(f"Warning: Could not determine public IP - {e}")
-    MY_IP = "127.0.0.1"  # Fallback to localhost
-
-# Custom progress bar function
-def print_progress_bar(percentage, width=50):
-    """Display a text-based progress bar"""
-    completed = int(width * percentage / 100)
-    remaining = width - completed
-    bar = '█' * completed + '░' * remaining
-    print(f"\r[{bar}] {percentage:.2f}%", end='', flush=True)
-
-async def async_main(torrent_path: str):
-    # Create directory for file pieces
-    os.makedirs("file_pieces", exist_ok=True)
-    
-    # Load torrent metadata and display info
-    tor = Torrent()
-    tor.load_file(torrent_path)
-    tor.display_info()
-
-    # Initialize tracker and piece manager
-    tracker = TrackerHandler(tor)
-    piece_manager = PieceManager(tor)
-
-    # Send tracker request (in a thread since requests is blocking)
-    await asyncio.to_thread(tracker.send_request)
-    print(f"Tracker response: {tracker.response}\n")
-
-    # Create the peer manager and add peers from the tracker.
-    peer_manager = AsyncPeerManager(tracker, piece_manager, MY_IP)
-    await peer_manager.add_peers()
-
-    # Print initial connection stats
-    print(f"\n=== Initial Connection Status ===")
-    print(f"Connected to {len(peer_manager.connected_peers)} peers total")
-    print(f"  - {peer_manager.stats['connected_from_tracker']} from tracker")
-    print(f"  - {peer_manager.stats['connected_from_pex']} from PEX")
-
-    # Variable to track last progress display time
-    last_progress_update = time.time()
-    
-    # Last progress percentage to avoid repeated printing of the same value
-    last_progress_percentage = -1
-    
-    # Main loop for PEX operations
-    pex_round = 0
-    completed = False
-    
-    while not completed:
-        pex_round += 1
-        print(f"\n\n=== PEX Round {pex_round} ===")
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("BitTorrent Client")
+        self.resize(900, 600)
         
-        # Clean up disconnected peers
-        for (ip, port), peer in list(peer_manager.connected_peers.items()):
-            if peer.writer is None or peer.writer.is_closing():
-                print(f"Removing disconnected peer {ip}:{port}")
-                source = getattr(peer, 'source', 'unknown')
-                if source == "pex":
-                    peer_manager.stats["connected_from_pex"] -= 1
-                elif source == "tracker":
-                    peer_manager.stats["connected_from_tracker"] -= 1
-                del peer_manager.connected_peers[(ip, port)]
+        # Create session manager
+        self.session_manager = SessionManager()
         
-        # Share peers via PEX
-        await peer_manager.share_peers_via_pex()
+        # Set up UI
+        self.setup_ui()
         
-        # Check if download is complete
-        if piece_manager.is_complete():
-            print("\n\n🎉 Download completed! 🎉")
-            print(f"All {piece_manager.stats['pieces_completed']} pieces downloaded successfully.")
+        # Timer for stats updates
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_stats)
+        self.timer.start(1000)  # Update every second
+    
+    def setup_ui(self):
+        # Main widget and layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
+        
+        # Button row
+        button_layout = QHBoxLayout()
+        
+        self.add_button = QPushButton("Add Torrent")
+        self.add_button.clicked.connect(self.add_torrent)
+        button_layout.addWidget(self.add_button)
+        
+        layout.addLayout(button_layout)
+        
+        # Torrents table
+        self.torrents_table = QTableWidget(0, 6)
+        self.torrents_table.setHorizontalHeaderLabels(
+            ["Name", "Size", "Progress", "Status", "Speed", "Peers"]
+        )
+        self.torrents_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.torrents_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.torrents_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.torrents_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.torrents_table.customContextMenuRequested.connect(self.show_context_menu)
+        
+        layout.addWidget(self.torrents_table)
+        
+        # Status bar
+        self.statusBar().showMessage("Ready")
+    
+    def add_torrent(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Torrent File", "", "Torrent Files (*.torrent)"
+        )
+        
+        if file_path:
+            download_dir = QFileDialog.getExistingDirectory(
+                self, "Select Download Directory"
+            )
             
-            # Assemble the final file
-            output_path = assemble_file(piece_manager, tor)
-            print(f"\nFile assembled and saved to: {output_path}")
+            if download_dir:
+                # Add torrent to session manager
+                asyncio.create_task(self.session_manager.add_torrent(file_path, download_dir))
+                self.statusBar().showMessage(f"Added torrent: {file_path}")
+    
+    def show_context_menu(self, position):
+        # Get selected row
+        index = self.torrents_table.indexAt(position)
+        if not index.isValid():
+            return
             
-            # Send completed event to tracker
-            print("Sending completed event to tracker...")
-            await asyncio.to_thread(lambda: tracker.send_request("completed"))
+        row = index.row()
+        session_id = self.torrents_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        
+        # Create context menu
+        menu = QMenu(self)
+        
+        # Add actions based on torrent state
+        session = self.session_manager.get_session(session_id)
+        if not session:
+            return
             
-            completed = True
-            break
+        if session.state == SessionState.DOWNLOADING:
+            pause_action = menu.addAction("Pause")
+            pause_action.triggered.connect(lambda: asyncio.create_task(self.session_manager.pause_session(session_id)))
+        elif session.state == SessionState.PAUSED:
+            resume_action = menu.addAction("Resume")
+            resume_action.triggered.connect(lambda: asyncio.create_task(self.session_manager.start_session(session_id)))
+        
+        stop_action = menu.addAction("Stop")
+        stop_action.triggered.connect(lambda: asyncio.create_task(self.session_manager.stop_session(session_id)))
+        
+        menu.addSeparator()
+        
+        remove_action = menu.addAction("Remove")
+        remove_action.triggered.connect(lambda: asyncio.create_task(self.session_manager.remove_session(session_id)))
+        
+        # Show menu
+        menu.exec(self.torrents_table.viewport().mapToGlobal(position))
+    
+    def update_stats(self):
+        """Update the UI with current torrent stats"""
+        # Get all session stats
+        all_stats = self.session_manager.get_all_session_stats()
+        all_sessions = self.session_manager.get_all_sessions()
+        
+        # Update or add rows for each session
+        for session_id, stats in all_stats.items():
+            session = all_sessions[session_id]
             
-        # Periodically refresh tracker to get new peers if connection count is low
-        if len(peer_manager.connected_peers) < 10 and pex_round % 5 == 0:
-            print("Low connection count, refreshing tracker...")
-            try:
-                await asyncio.to_thread(tracker.send_request)
-                print(f"Refreshed tracker response with {len(tracker.peers_list)} peers")
+            # Find existing row or create new one
+            row = -1
+            for i in range(self.torrents_table.rowCount()):
+                if self.torrents_table.item(i, 0).data(Qt.ItemDataRole.UserRole) == session_id:
+                    row = i
+                    break
+            
+            if row == -1:
+                # Add new row
+                row = self.torrents_table.rowCount()
+                self.torrents_table.insertRow(row)
                 
-                # Connect to new peers from tracker
-                tasks = []
-                for peer_info in tracker.peers_list:
-                    if (peer_info[0], peer_info[1]) not in peer_manager.connected_peers:
-                        tasks.append(asyncio.create_task(
-                            peer_manager.add_peer_info(peer_info, source="tracker")
-                        ))
-                        
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
-            except Exception as e:
-                print(f"Error refreshing tracker: {e}")
-        
-        # Update progress more frequently than PEX status
-        current_time = time.time()
-        if current_time - last_progress_update >= 2:  # Update every 2 seconds
-            progress = piece_manager.get_progress()
-            
-            # Only print if progress changed
-            if abs(progress - last_progress_percentage) > 0.01:
-                print("\nDownload Progress:")
-                print_progress_bar(progress)
-                print(f"\nPieces: {len(piece_manager.completed_pieces)}/{piece_manager.number_of_pieces}")
-                last_progress_percentage = progress
+                # Set session ID as user data
+                name_item = QTableWidgetItem(stats['name'])
+                name_item.setData(Qt.ItemDataRole.UserRole, session_id)
+                self.torrents_table.setItem(row, 0, name_item)
                 
-            last_progress_update = current_time
-        
-        # Print status report less frequently
-        print("\n\n=== PEX Status Report ===")
-        print(f"Connected peers: {len(peer_manager.connected_peers)} total")
-        print(f"  - {peer_manager.stats['connected_from_tracker']} from tracker")
-        print(f"  - {peer_manager.stats['connected_from_pex']} from PEX")
-        print(f"Known peers: {len(peer_manager.known_peers)} total")
-        print(f"  - {peer_manager.stats['tracker_peers']} from tracker")
-        print(f"  - {peer_manager.stats['pex_peers']} from PEX")
-        print(f"Pieces downloaded: {peer_manager.stats['pieces_downloaded']}")
-        
-        # Print details of connected peers
-        if peer_manager.connected_peers:
-            print("\nActive connections:")
-            for (ip, port), peer in list(peer_manager.connected_peers.items()):
-                supports_pex = "with PEX" if hasattr(peer, 'pex') and peer.pex.supports_pex else "no PEX"
-                source = getattr(peer, 'source', 'unknown')
-                print(f"  - {ip}:{port} ({supports_pex}, from {source})")
+                # Set size
+                size_item = QTableWidgetItem(self.format_size(self.get_torrent_size(session)))
+                self.torrents_table.setItem(row, 1, size_item)
+            
+            # Update progress
+            progress = stats['progress']
+            progress_item = QTableWidgetItem(f"{progress:.1f}%")
+            self.torrents_table.setItem(row, 2, progress_item)
+            
+            # Update status
+            status_text = self.get_status_text(session.state)
+            status_item = QTableWidgetItem(status_text)
+            self.torrents_table.setItem(row, 3, status_item)
+            
+            # Update speed
+            speed_text = self.format_speed(stats['download_speed'])
+            speed_item = QTableWidgetItem(speed_text)
+            self.torrents_table.setItem(row, 4, speed_item)
+            
+            # Update peers
+            peers_item = QTableWidgetItem(str(stats['peers']))
+            self.torrents_table.setItem(row, 5, peers_item)
+    
+    def get_torrent_size(self, session):
+        """Get the total size of a torrent"""
+        if session.torrent:
+            return session.torrent.file_length
+        return 0
+    
+    def get_status_text(self, state):
+        """Convert session state to human-readable text"""
+        return {
+            SessionState.STOPPED: "Stopped",
+            SessionState.DOWNLOADING: "Downloading",
+            SessionState.PAUSED: "Paused",
+            SessionState.COMPLETED: "Completed",
+            SessionState.ERROR: "Error"
+        }.get(state, "Unknown")
+    
+    @staticmethod
+    def format_size(size_bytes):
+        """Format file size in human-readable format"""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes/1024:.1f} KB"
+        elif size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes/(1024*1024):.1f} MB"
         else:
-            print("\nNo active connections")
-        
-        await asyncio.sleep(10)
+            return f"{size_bytes/(1024*1024*1024):.1f} GB"
+    
+    @staticmethod
+    def format_speed(bytes_per_sec):
+        """Format speed in human-readable format"""
+        if bytes_per_sec < 1024:
+            return f"{bytes_per_sec:.1f} B/s"
+        elif bytes_per_sec < 1024 * 1024:
+            return f"{bytes_per_sec/1024:.1f} KB/s"
+        else:
+            return f"{bytes_per_sec/(1024*1024):.1f} MB/s"
 
-    # Clean shutdown
-    print("\nPerforming clean shutdown...")
+def main():
+    app = QApplication(sys.argv)
     
-    # Close all peer connections
-    for (ip, port), peer in list(peer_manager.connected_peers.items()):
-        if peer.writer:
-            try:
-                peer.writer.close()
-                await peer.writer.wait_closed()
-                print(f"Closed connection to {ip}:{port}")
-            except Exception as e:
-                print(f"Error closing connection to {ip}:{port}: {e}")
+    # Use qasync to bridge PyQt and asyncio
+    loop = qasync.QEventLoop(app)
+    asyncio.set_event_loop(loop)
     
-    # Final tracker update with 'stopped' event
-    try:
-        print("Sending stopped event to tracker...")
-        await asyncio.to_thread(lambda: tracker.send_request("stopped"))
-    except Exception as e:
-        print(f"Error sending stopped event to tracker: {e}")
+    window = MainWindow()
+    window.show()
     
-    print("Shutdown complete. Goodbye!")
-
-def assemble_file(piece_manager, torrent):
-    """Assemble the final file(s) from the downloaded pieces.
-    
-    Handles both single-file and multi-file torrents.
-    """
-    # Determine output path
-    output_path = torrent.name
-    
-    print(f"Assembling file(s) from {piece_manager.number_of_pieces} pieces...")
-    
-    # Check if it's a multi-file torrent
-    if len(torrent.files) > 1:
-        return assemble_multifile_torrent(piece_manager, torrent, output_path)
-    else:
-        return assemble_singlefile_torrent(piece_manager, torrent, output_path)
-
-def assemble_singlefile_torrent(piece_manager, torrent, output_path):
-    """Assemble a single-file torrent."""
-    print(f"Processing single-file torrent: {output_path}")
-    
-    with open(output_path, 'wb') as output_file:
-        for i in range(piece_manager.number_of_pieces):
-            piece_path = f"file_pieces/{i}.part"
-            
-            if not os.path.exists(piece_path):
-                print(f"Warning: Piece {i} is missing, output may be incomplete")
-                continue
-                
-            with open(piece_path, 'rb') as piece_file:
-                output_file.write(piece_file.read())
-    
-    print(f"Saved single file to: {output_path}")
-    return output_path
-
-def assemble_multifile_torrent(piece_manager, torrent, base_directory):
-    """Assemble a multi-file torrent, distributing pieces across files."""
-    print(f"Processing multi-file torrent: {base_directory}")
-    
-    # Create the base directory
-    os.makedirs(base_directory, exist_ok=True)
-    
-    # Calculate the file boundaries in terms of bytes
-    file_boundaries = []
-    current_position = 0
-    
-    for file_info in torrent.files:
-        file_boundaries.append({
-            'path': file_info['path'],
-            'length': file_info['length'],
-            'offset': current_position
-        })
-        current_position += file_info['length']
-    
-    # Piece size is constant except for the last piece
-    piece_length = torrent.piece_length
-    
-    # Create a buffer to hold all piece data
-    all_data = bytearray()
-    
-    # Read all pieces in order
-    for i in range(piece_manager.number_of_pieces):
-        piece_path = f"file_pieces/{i}.part"
-        
-        if not os.path.exists(piece_path):
-            print(f"Warning: Piece {i} is missing, output will be incomplete")
-            # Fill with zeros if piece is missing to maintain offsets
-            if i < piece_manager.number_of_pieces - 1:
-                all_data.extend(bytes(piece_length))
-            else:
-                # For the last piece, need to calculate its actual length
-                last_piece_size = torrent.file_length - (piece_manager.number_of_pieces - 1) * piece_length
-                all_data.extend(bytes(last_piece_size))
-            continue
-            
-        with open(piece_path, 'rb') as piece_file:
-            piece_data = piece_file.read()
-            all_data.extend(piece_data)
-    
-    print(f"Read {len(all_data)} bytes from {piece_manager.number_of_pieces} pieces")
-    
-    # Write the data to each file
-    files_created = 0
-    
-    for file_info in file_boundaries:
-        # Construct the full path
-        full_path = os.path.join(base_directory, *file_info['path'])
-        
-        # Create parent directories if needed
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        
-        # Extract the data for this file
-        start = file_info['offset']
-        end = start + file_info['length']
-        file_data = all_data[start:end]
-        
-        # Write the file
-        with open(full_path, 'wb') as output_file:
-            output_file.write(file_data)
-            files_created += 1
-        
-        print(f"Created file: {full_path} ({file_info['length']} bytes)")
-    
-    print(f"Created {files_created} files in {base_directory}")
-    return base_directory
+    with loop:
+        loop.run_forever()
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python main.py <torrent_file>")
-        sys.exit(1)
-    
-    # Make sure the Extended message type is registered in Message's message map
-    if Message._message_map is None:
-        Message._build_message_map()
-    Message._message_map[20] = Extended
-    
-    print("Starting Enhanced BitTorrent Client with PEX support")
-    print("---------------------------------------------------")
-    
-    # Run the main function
-    try:
-        asyncio.run(async_main(sys.argv[1]))
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-    except Exception as e:
-        print(f"Error in main loop: {e}")
-        traceback.print_exc()
+    main()

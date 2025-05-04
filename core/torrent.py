@@ -58,6 +58,7 @@ class Torrent:
             if not self.announce and self.announce_list and self.announce_list[0]:
                 self.announce = self.announce_list[0][0]
                 
+                
             # Handle single-file vs multi-file torrents
             if b'files' in data[b'info']:
                 # Multi-file torrent
@@ -75,6 +76,8 @@ class Torrent:
                 self.file_length = data[b'info'][b'length']
                 self.files = [{'length': self.file_length, 'path': [self.name]}]
             
+            if not self.announce and not self.announce_list:
+                print(data)
     def display_info(self):
         print(f"Name: {self.name}")
         print(f"Files: {self.files}")
