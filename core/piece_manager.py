@@ -433,3 +433,71 @@ class PieceManager:
             print(f"Current rate: {stats['download_rate_pieces']:.2f} pieces/sec, ETA: {eta}")
         
         return stats
+        
+    def has_piece(self, piece_index):
+        """Check if a piece has been successfully downloaded."""
+        return piece_index in self.completed_pieces
+
+    async def get_piece_block(self, piece_index, offset, length):
+        """
+        Retrieve a block of data from a completed piece.
+        
+        Args:
+            piece_index: Index of the piece
+            offset: Byte offset within the piece
+            length: Number of bytes to retrieve
+            
+        Returns:
+            Requested block data as bytes, or None if not available
+        """
+        if not self.has_piece(piece_index):
+            return None
+        
+        # Calculate the absolute byte offset in the torrent
+        absolute_offset = piece_index * self.torrent.piece_length + offset
+        
+        # Find which file(s) contain this data
+        sorted_files = sorted(self.output_files.items(), key=lambda x: x[1]['offset'])
+        
+        # Prepare buffer for the result
+        result_data = bytearray(length)
+        bytes_read = 0
+        
+        for file_path, file_info in sorted_files:
+            file_start = file_info['offset']
+            file_end = file_start + file_info['length']
+            
+            # Skip files that don't contain our data
+            if absolute_offset >= file_end or absolute_offset + length <= file_start:
+                continue
+            
+            # Calculate overlap with this file
+            read_start = max(0, absolute_offset - file_start)
+            read_end = min(file_info['length'], absolute_offset + length - file_start)
+            read_length = read_end - read_start
+            
+            # Skip if no actual overlap
+            if read_length <= 0:
+                continue
+            
+            # Calculate where in our result buffer this data belongs
+            buffer_offset = max(0, file_start - absolute_offset)
+            
+            # Read the data from this file
+            try:
+                with open(file_path, 'rb') as f:
+                    f.seek(read_start)
+                    file_data = f.read(read_length)
+                    result_data[buffer_offset:buffer_offset + len(file_data)] = file_data
+                    bytes_read += len(file_data)
+            except Exception as e:
+                print(f"Error reading from {file_path}: {e}")
+                continue
+        
+        # Verify we read all the requested data
+        if bytes_read != length:
+            print(f"Warning: Only read {bytes_read}/{length} bytes for piece {piece_index}")
+            # Return whatever we got, or None if we got nothing
+            return bytes(result_data[:bytes_read]) if bytes_read > 0 else None
+        
+        return bytes(result_data)

@@ -198,7 +198,7 @@ class Piece(Message):
         self.begin = begin
         self.block = block
     
-    @classmethod
+
     def serialize(self):
         payload = (
             self.index.to_bytes(4, byteorder='big') +

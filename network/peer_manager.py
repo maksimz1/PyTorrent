@@ -229,10 +229,17 @@ class AsyncPeerManager:
                     elif isinstance(msg, message.Have):
                         peer.handle_have(msg)
                     elif isinstance(msg, message.Request):
-                        # TODO: Handle Request messages properly
-                        print(f"🔴 Received Request message from {peer.ip}:{peer.port} - piece: {msg.index}, offset: {msg.begin}, length: {msg.length}")
+                        # Handle Request messages by sending the requested piece
+                        print(f"🔵 Received Request message from {peer.ip}:{peer.port} - piece: {msg.index}, offset: {msg.begin}, length: {msg.length}")
+                        await peer.handle_request(msg)
                     elif isinstance(msg, message.Interested):
-                        print(f"🔵 Recieved Interested message from {peer.ip}:{peer.port}")
+                        print(f"🔵 Received Interested message from {peer.ip}:{peer.port}")
+                        # Handle Interested message
+                        await peer.handle_interested()
+                    elif isinstance(msg, message.NotInterested):
+                        # Update peer state
+                        peer.state['peer_interested'] = False
+                        print(f"Peer {peer.ip}:{peer.port} is no longer interested in our pieces")
 
                 except Exception as e:
                     print(f"Error processing message from {peer.ip}:{peer.port}: {e}")

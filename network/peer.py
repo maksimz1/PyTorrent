@@ -261,3 +261,49 @@ class Peer:
     def am_interested(self):
         return self.state['am_interested']
     
+    async def handle_request(self, request_msg):
+        """Handle a Request message from a peer by sending the requested piece."""
+        # Get the request details
+        piece_index = request_msg.index
+        offset = request_msg.begin
+        length = request_msg.length
+        
+        print(f"Processing request for piece {piece_index}, offset {offset}, length {length} from {self.ip}:{self.port}")
+        
+        # Check if we have the requested piece
+        if not self.piece_manager.has_piece(piece_index):
+            print(f"Can't fulfill request for piece {piece_index} - we don't have it")
+            return False
+        
+        # Get the piece data from the PieceManager
+        piece_data = await self.piece_manager.get_piece_block(piece_index, offset, length)
+        if not piece_data:
+            print(f"Failed to read piece {piece_index} data from disk")
+            return False
+        
+        # Create and send the Piece message
+        piece_msg = message.Piece(piece_index, offset, piece_data)
+        try:
+            await self.send(piece_msg)
+            print(f"✅ Sent piece {piece_index} block at offset {offset} to {self.ip}:{self.port}")
+            return True
+        except Exception as e:
+            print(f"Error sending piece {piece_index} to {self.ip}:{self.port}: {e}")
+            return False
+
+    async def handle_interested(self):
+        """Handle an Interested message by updating peer state."""
+        self.state['peer_interested'] = True
+        print(f"Peer {self.ip}:{self.port} is now interested in our pieces")
+        
+        # For simplicity, immediately unchoke this peer
+        if self.state['am_choking']:
+            await self.send_unchoke()
+
+    async def send_unchoke(self):
+        """Send an Unchoke message to the peer."""
+        if self.state['am_choking']:
+            unchoke_msg = message.Unchoke()
+            await self.send(unchoke_msg)
+            self.state['am_choking'] = False
+            print(f"Sent UNCHOKE to {self.ip}:{self.port}")
