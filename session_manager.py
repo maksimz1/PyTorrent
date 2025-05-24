@@ -62,3 +62,10 @@ class SessionManager:
     def get_all_session_stats(self):
         """Get stats for all sessions"""
         return {session_id: session.stats for session_id, session in self.sessions.items()}
+    
+    def find_session_by_info_hash(self, info_hash):
+        """Find a session by its torrent info_hash."""
+        for session_id, session in self.sessions.items():
+            if hasattr(session, 'tracker') and session.tracker.info_hash == info_hash:
+                return session
+        return None

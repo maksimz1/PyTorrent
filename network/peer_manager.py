@@ -451,7 +451,23 @@ class AsyncPeerManager:
             return True
         
         return False
+    
+    async def add_incoming_peer(self, peer):
+        """Add a peer that has connected to us."""
+        if peer.ip == self.my_ip:
+            print("Skipping self connection.")
+            return
         
+        self.connected_peers[(peer.ip, peer.port)] = peer
+        print(f"Added incoming peer connection from {peer.ip}:{peer.port}")
+        
+        # Start message processor for this peer
+        peer_key = (peer.ip, peer.port)
+        self.peer_processors[peer_key] = asyncio.create_task(self.process_peer_messages(peer))
+        
+        # Start a task to handle this peer
+        self.tasks.add(asyncio.create_task(self.handle_peer(peer)))
+
     def debug_bitfield(self, bitfield, peer_ip, peer_port):
         """Print detailed information about a peer's bitfield."""
         if bitfield is None:
