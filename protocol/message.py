@@ -189,6 +189,15 @@ class Request(Message):
         message_length = (1 + len(payload)).to_bytes(4, byteorder='big')
 
         return message_length + bytes([self.message_id]) + payload
+    
+    @classmethod
+    def deserialize_payload(cls, data):
+        if len(data) != 12: # 4 bytes for index, 4 for begin, 4 for length
+            raise ValueError("Invalid payload length for Request message")
+        index = int.from_bytes(data[:4], 'big')
+        begin = int.from_bytes(data[4:8], 'big')
+        length = int.from_bytes(data[8:], 'big')
+        return Request(index, begin, length)
 
 class Piece(Message):
     message_id = 7
@@ -216,6 +225,7 @@ class Piece(Message):
         begin = int.from_bytes(data[4:8], 'big')
         block = data[8:]
         return Piece(index, begin, block)
+    
 
 class Cancel(Message):
     message_id = 8

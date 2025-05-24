@@ -113,6 +113,14 @@ class MainWindow(QMainWindow):
         all_stats = self.session_manager.get_all_session_stats()
         all_sessions = self.session_manager.get_all_sessions()
         
+
+        # Clear existing(expired) rows
+        for row in range(self.torrents_table.rowCount() - 1, -1, -1):
+            session_id = self.torrents_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if session_id not in (all_sessions.keys()):
+                print(f"Removing row {row} for deleted session {session_id}")
+                self.torrents_table.removeRow(row)
+                
         # Update or add rows for each session
         for session_id, stats in all_stats.items():
             session = all_sessions[session_id]
