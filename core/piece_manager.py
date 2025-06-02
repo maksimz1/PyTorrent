@@ -19,11 +19,13 @@ class PieceManager:
         self.piece_lock_time: Dict[int, float] = {}  # When piece was marked busy
         self.number_of_pieces = torrent.total_pieces
         self.bitfield = bitstring.BitArray(self.number_of_pieces)  # Bitfield to track piece availability
+        # print(self.number_of_pieces)
+        # print(torrent.total_pieces)
+        # print(len(self.bitfield))
+        # exit(1)
 
         # Pre-allocate the output file(s)
         self.output_files = {} # Maps file paths to their info
-
-        self._pre_allocate_files()
 
         # Stats for debugging
         self.stats = {
@@ -36,25 +38,28 @@ class PieceManager:
             "download_rate_pieces": 0  # For tracking download speed
         }
         
+
+        # Initialize piece objects
+        self._generate_pieces()
+
+        self._pre_allocate_files()
+
+        # Load any already downloaded pieces
+        self._load_completed_pieces()
+
         # Load expected hashes from the torrent metadata
         self.expected_hashes = [
             torrent.pieces[i * 20:(i + 1) * 20]
             for i in range(torrent.total_pieces)
         ]
-        
-        
-        
-        # Initialize piece objects
-        self._generate_pieces()
-        
-        # Load any already downloaded pieces
-        self._load_completed_pieces()
-        
+
         print(f"PieceManager initialized with {self.number_of_pieces} pieces.")
         print(f"Loaded {len(self.completed_pieces)} already completed pieces.")
 
     def _pre_allocate_files(self):
-        """Create empty files of the correct size."""
+        """Create empty files of the correct size if they don't already exist."""
+        created_new_files = False
+
         if len(self.torrent.files) > 1:
             # Handle multi-file torrent
             base_dir = os.path.join(self.download_dir, self.torrent.name)
@@ -70,10 +75,12 @@ class PieceManager:
                 # Create parent directories
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 
-                # Pre-allocate the file
-                with open(file_path, 'wb') as f:
-                    f.seek(file_info['length'] - 1)
-                    f.write(b'\0')
+                # Only pre-allocate if file doesn't exist
+                if not os.path.exists(file_path):
+                    with open(file_path, 'wb') as f:
+                        f.seek(file_info['length'] - 1)
+                        f.write(b'\0')
+                    created_new_files = True
                 
                 # Store file info with byte offset
                 self.output_files[file_path] = {
@@ -87,16 +94,26 @@ class PieceManager:
             # Handle single-file torrent
             file_path = os.path.join(self.download_dir, self.torrent.name)
             
-            # Pre-allocate the file
-            with open(file_path, 'wb') as f:
-                f.seek(self.torrent.file_length - 1)
-                f.write(b'\0')
-            
+            # Only pre-allocate if file doesn't exist
+            if not os.path.exists(file_path):
+                with open(file_path, 'wb') as f:
+                    f.seek(self.torrent.file_length - 1)
+                    f.write(b'\0')
+                created_new_files = True
+
             # Store file info
             self.output_files[file_path] = {
                 'length': self.torrent.file_length,
                 'offset': 0
             }
+
+        
+        # If we created new files, remove any old progress files
+        if created_new_files:
+            progress_path = os.path.join(self.download_dir, f"{self.torrent.name}.progress")
+            if os.path.exists(progress_path):
+                os.remove(progress_path)
+                print("Removed old .PROGRESS file")
             
         print(f"Pre-allocated {len(self.output_files)} file(s) for download")
 
@@ -124,7 +141,7 @@ class PieceManager:
         calculated_pieces = (file_length + piece_length - 1) // piece_length
         if calculated_pieces != self.number_of_pieces:
             print(f"Warning: Expected {calculated_pieces} pieces based on file size, but metadata has {self.number_of_pieces}")
-            self.number_of_pieces = calculated_pieces
+            # self.number_of_pieces = calculated_pieces
         
         # Create pieces with proper lengths
         for i in range(self.number_of_pieces):
@@ -155,11 +172,30 @@ class PieceManager:
             
     def _load_completed_pieces(self):
         """Check for already downloaded pieces and mark them as completed."""
-        for piece in self.pieces:
-            if self.is_piece_downloaded(piece):
-                self.completed_pieces.add(piece.piece_index)
-                self.bitfield.set(piece.piece_index, 1)
-                self.stats["pieces_completed"] += 1
+        progress_path = os.path.join(self.download_dir, f"{self.torrent.name}.progress")
+        torrent_path = os.path.join(self.download_dir, f"{self.torrent.name}")
+        
+        if not os.path.exists(progress_path) or not os.path.exists(torrent_path):
+            return
+        
+        try:
+            with open(progress_path, 'rb') as file:
+                saved_piece_count = int.from_bytes(file.read(4), 'big')
+                saved_bitfield = bitstring.BitArray(file.read(saved_piece_count))
+
+            for piece_index in range(self.number_of_pieces):
+                if saved_bitfield[piece_index]:
+                    self.completed_pieces.add(piece_index)
+                    self.bitfield[piece_index] = 1
+            
+            self.stats['pieces_completed'] = len(self.completed_pieces)
+            print(f"Loaded progress: {len(self.completed_pieces)}/{self.number_of_pieces} pieces ({self.get_progress():.1f}%)")
+
+        except Exception as e:
+            print(f"Error loading progress: {e}")
+            exit(1)
+
+
 
     def recieve_block_piece(self, piece_index: int, piece_offset: int, piece_data: bytes):
         """Process a received block and write it directly to the output file."""
@@ -183,6 +219,7 @@ class PieceManager:
                 
                 # Release the piece from memory after writing to file
                 self.release_piece(piece_index, failed=False)
+                piece.flush()
                 self.stats["pieces_completed"] += 1
                 
                 # Save progress
@@ -254,6 +291,7 @@ class PieceManager:
         
         try:
             with open(progress_path, 'wb') as f:
+                f.write(self.number_of_pieces.to_bytes(4, 'big'))
                 f.write(self.bitfield.tobytes())
         except Exception as e:
             print(f"Error saving progress: {e}")
